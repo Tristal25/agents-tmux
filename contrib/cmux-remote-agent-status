@@ -3,16 +3,22 @@
 #
 #   cmux-remote-agent-status <remote-host> [interval-seconds]
 #
-# cmux drives its sidebar from hooks that run beside the agent, and it accepts them only over a
-# socket connection from a process it started itself. A chat on another machine therefore cannot
-# report for itself: whatever it sends arrives from outside and is refused. What it can do is answer
-# questions, so this runs in the surface's own shell, where the socket accepts it, and asks the
-# remote host what its chat is doing.
+# cmux takes agent state only from a process it can trace into one of its own terminals: it reads the
+# reporting process's surface and binds the chat's sidebar row to it. A chat on another machine has no
+# such process here, so whatever it sends from over there is ignored. What it can do is answer
+# questions, which is what this does: it runs in the surface's own shell, where the report is accepted,
+# and asks the remote host what its chat is doing.
 #
-# Which chat matters is settled exactly rather than guessed. The surface id travels into the remote
-# shell's environment when the connection opens, so the remote host can name the pty that belongs to
-# this surface, the tmux client on it, and the conversation that client is looking at. Matching on
-# connection ports instead would attribute the wrong chat whenever a shell owns more than one.
+# The row is bound by a session-start, and a later event never moves it, so a chat reported without one
+# keeps whichever surface it was first seen in. That surface is gone by the next connection, and a row
+# that no longer exists cannot show anything, which is why the first sight of a chat sends
+# session-start and a chat that changes underneath sends another.
+#
+# Which chat is being shown is settled through the connection rather than the environment. A chat
+# opened in tmux keeps the environment tmux itself started with, so a marker placed in the shell never
+# reaches it; the ssh connection is visible from both ends at all times. This asks the remote host
+# which pty carries the connection this terminal holds, which tmux client sits on that pty, and which
+# conversation that client is looking at.
 set -u
 
 HOST="${1:-}"
@@ -23,55 +29,78 @@ CLI="${CMUX_BUNDLED_CLI_PATH:-/Applications/cmux.app/Contents/Resources/bin/cmux
 [ -x "$CLI" ] || { echo "cmux cli not found at $CLI" >&2; exit 3; }
 [ -n "${CMUX_SURFACE_ID:-}" ] || { echo "run this inside a cmux terminal" >&2; exit 4; }
 
-# What the remote chat on that client is: its conversation id and what it published about itself.
+# cmux notes the reporting process as the one to watch for this chat. This loop is that process, and it
+# lives exactly as long as the terminal holding the connection, which is the same span the chat is
+# reachable for.
+export CMUX_CLAUDE_PID=$$
+export CMUX_CLAUDE_HOOK_CMUX_BIN="$CLI"
+
+# A control socket keeps every poll on one connection instead of paying a handshake each time.
+CONTROL="${TMPDIR:-/tmp}/cmux-remote-agent-$$"
+
+# The port the interactive connection leaves from, which names it on the far side. The ssh is a sibling
+# of this loop, started by the same shell, and it may not be up yet on the first poll.
+local_port() {
+    local ssh_pid
+    ssh_pid=$(pgrep -P "$PPID" -x ssh 2>/dev/null | head -1)
+    [ -n "$ssh_pid" ] || return 0
+    # Selections are combined with `and` only when asked: without -a this reports every established
+    # socket on the machine, and the port would come from whichever process answered first.
+    lsof -a -nP -p "$ssh_pid" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null |
+        sed -n 's/^n.*:\([0-9]\{1,\}\)->.*/\1/p' | head -1
+}
+
+# The conversation the remote chat holds, and what it published about itself.
 remote_state() {
-    ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" "SURFACE='$CMUX_SURFACE_ID' bash -s" <<'REMOTE'
+    ssh -o BatchMode=yes -o ConnectTimeout=8 \
+        -o ControlMaster=auto -o ControlPath="$CONTROL" -o ControlPersist=30 \
+        "$HOST" "bash -s -- '${1:-}'" <<'REMOTE'
 set -u
-# The tmux client on the pty belonging to this ssh connection is showing one session, and the agent
-# registry says which conversation that session holds.
-# The pty belonging to this surface, named by the id its shell carries.
+port="${1:-}"
+
+# The pty carrying that connection: a login shell holds both the connection's ports and its terminal.
 tty=""
-for cand in $(ls /dev/pts 2>/dev/null); do
-    for pid in $(ps -o pid= -t "pts/$cand" 2>/dev/null); do
-        mine=$(cat /proc/$pid/environ 2>/dev/null | tr '\0' '\n' | sed -n 's/^CMUX_SURFACE_ID=//p')
-        [ "$mine" = "$SURFACE" ] && [ -n "$mine" ] && tty="/dev/pts/$cand"
+if [ -n "$port" ]; then
+    for dir in /proc/[0-9]*; do
+        [ -r "$dir/environ" ] || continue
+        vars=$(tr '\0' '\n' < "$dir/environ" 2>/dev/null) || continue
+        conn=$(printf '%s\n' "$vars" | sed -n 's/^SSH_CONNECTION=//p' | head -1)
+        [ -n "$conn" ] || continue
+        [ "$(printf '%s\n' "$conn" | awk '{print $2}')" = "$port" ] || continue
+        tty=$(printf '%s\n' "$vars" | sed -n 's/^SSH_TTY=//p' | head -1)
+        [ -n "$tty" ] && break
     done
-    [ -n "$tty" ] && break
-done
-[ -n "$tty" ] || exit 0
-session=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | awk -v t="$tty" '$1 == t {print $2; exit}')
+fi
+
+session=""
+[ -n "$tty" ] && session=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null |
+    awk -v t="$tty" '$1 == t {print $2; exit}')
+# One attached client is unambiguous whichever connection asked, so it answers when the pty does not.
+if [ -z "$session" ] && [ "$(tmux list-clients -F x 2>/dev/null | wc -l)" -eq 1 ]; then
+    session=$(tmux list-clients -F '#{client_session}' 2>/dev/null | head -1)
+fi
 [ -n "$session" ] || exit 0
+
 for f in "$HOME"/.claude/sessions/*.json; do
     [ -f "$f" ] || continue
-    read -r sid tm pub_status pid < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid] | @tsv' "$f" 2>/dev/null)
+    read -r sid tm published pid dir < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid, (.cwd // "-")] | @tsv' "$f" 2>/dev/null)
     [ "${tm%%:*}" = "$session" ] || continue
     kill -0 "$pid" 2>/dev/null || continue
-    printf '%s\t%s\n' "$sid" "$pub_status"
+    printf '%s\t%s\t%s\n' "$sid" "$published" "$dir"
     exit 0
 done
 REMOTE
 }
 
-# The process cmux can watch on this machine for this chat: the ssh that carries it.
-note_pid() {
-    local sid="$1" store="$HOME/.cmuxterm/claude-hook-sessions.json" ssh_pid
-    [ -f "$store" ] || return 0
-    ssh_pid=$(pgrep -P $PPID -x ssh 2>/dev/null | head -1)
-    [ -n "$ssh_pid" ] || return 0
-    /usr/bin/python3 - "$store" "$sid" "$ssh_pid" <<'PATCH'
-import json, sys
-store, sid, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
-try:
-    data = json.load(open(store))
-except Exception:
-    sys.exit(0)
-entry = data.get("sessions", {}).get(sid)
-if entry is None or entry.get("pid") == pid:
-    sys.exit(0)
-entry["pid"] = pid
-json.dump(data, open(store, "w"), indent=1)
-PATCH
-}
+# The directory is the chat's own, on the machine it runs on, so the row names where the work is
+# happening rather than wherever this terminal happens to sit.
+payload() { printf '{"session_id":"%s","cwd":"%s","transcript_path":""}' "$1" "$2"; }
+
+# The payload arrives on a here-string so this loop stays the process cmux notes: a pipeline would make
+# a short-lived subshell the reporter, and a reporter that has already exited reads as a chat that is
+# gone. No launch data is sent with it, because the command that would reopen this chat runs on another
+# machine and cmux would otherwise offer to start it here.
+report() { "$CLI" hooks claude "$1" >/dev/null 2>&1 <<<"$(payload "$2" "$3")"; }
 
 # `busy` and `shell` are a turn or a command in flight; anything else is waiting on you.
 event_for() {
@@ -81,31 +110,56 @@ event_for() {
     esac
 }
 
+chat=""
+chat_dir=""
 last=""
+
+finish() {
+    [ -n "$chat" ] && report session-end "$chat" "$chat_dir"
+    "$CLI" clear-status claude_code >/dev/null 2>&1
+    ssh -o ControlPath="$CONTROL" -O exit "$HOST" 2>/dev/null
+    exit 0
+}
+trap finish EXIT INT TERM
+
+misses=0
 while :; do
-    if state=$(remote_state) && [ -n "$state" ]; then
-        sid=${state%%$'\t'*}
-        status=${state##*$'\t'}
-        event=$(event_for "$status")
+    if state=$(remote_state "$(local_port)") && [ -n "$state" ]; then
+        misses=0
+        IFS=$'\t' read -r sid published dir <<<"$state"
+
+        if [ "$sid" != "$chat" ]; then
+            # Binds this chat's row to this surface, and re-binds a row still pointing at a surface
+            # from an earlier connection.
+            chat="$sid"
+            chat_dir="$dir"
+            report session-start "$chat" "$chat_dir"
+            last=""
+        fi
+        chat_dir="$dir"
+
+        event=$(event_for "$published")
         if [ "$event" != "$last" ]; then
-            # cmux identifies the agent by the parent of the hook that reported, and watches that
-            # process to decide whether the chat is still working. A pipeline would make some
-            # short-lived subshell the parent, which dies at once and reads as an agent that has
-            # gone, so the payload arrives on a here-string and this loop is the parent.
-            "$CLI" hooks claude "$event" >/dev/null 2>&1 <<<"$(printf '{"session_id":"%s","cwd":"%s"}' "$sid" "$PWD")"
-            # The hook drives cmux's own lifecycle. A status entry is the documented way to put text
-            # on a row, so both are set: whichever the sidebar draws for a remote surface, the row
-            # says what the chat is doing.
+            report "$event" "$chat" "$chat_dir"
+            # The hook drives cmux's own lifecycle for the row. A status entry is the documented way to
+            # put text on one, so both are set and the row says what the chat is doing either way.
             case "$event" in
                 prompt-submit) "$CLI" set-status claude_code Running --icon bolt --color '#4c8dff' --priority 80 >/dev/null 2>&1 ;;
                 *) "$CLI" clear-status claude_code >/dev/null 2>&1 ;;
             esac
-            # cmux records a lifecycle per surface and checks the agent is alive before showing it
-            # working. It learns that pid by being the agent's parent, which no remote chat can
-            # offer, so the ssh holding this connection stands in: it lives exactly as long as the
-            # chat is reachable from here, which is the same question the check is asking.
-            note_pid "$sid"
             last="$event"
+        fi
+    else
+        # Nothing is being shown here any more: the chat was detached, ended, or the host went quiet.
+        # A row left saying `running` would keep saying it forever, so the chat is closed out and the
+        # next one seen starts again with its own session-start. One quiet answer is not enough,
+        # since a dropped poll would otherwise end a chat that is still working.
+        misses=$((misses + 1))
+        if [ -n "$chat" ] && [ "$misses" -ge 2 ]; then
+            report session-end "$chat" "$chat_dir"
+            "$CLI" clear-status claude_code >/dev/null 2>&1
+            chat=""
+            last=""
         fi
     fi
     sleep "$INTERVAL"

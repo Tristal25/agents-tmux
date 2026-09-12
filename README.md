@@ -159,19 +159,33 @@ A notification is OSC 9, and working state is OSC 9;4, the progress sequence, in
 
 A hook reads its payload from a pipe, so `tty` finds no terminal there; the script takes the controlling terminal by walking up to the agent that spawned it.
 
-`contrib/cmux-remote-agent-status` carries the running state, and it runs on the *laptop* rather than beside the chat. cmux accepts agent reports only over a socket connection from a process it started itself, so a report sent from the remote host is refused outright:
+`contrib/cmux-remote-agent-status` carries the running state, and it runs on the *laptop*, inside the terminal that holds the connection. cmux takes agent state from a process it can trace into one of its own terminals: it reads that process's surface and binds the chat's row to it. A report sent from the remote host has no such process on this side, so it is refused at the socket:
 
 ```
 ERROR: Access denied - only processes started inside cmux can connect
 ```
 
-So the reporter lives inside the terminal cmux started, and asks the remote host what its chat is doing every few seconds, then calls cmux's own hook commands locally. `contrib/example-remote-host-function.fish` shows the shell function that starts it alongside the ssh and ends it with the shell, so nothing has to be configured per session.
+So the reporter lives inside the terminal cmux started, asks the remote host what its chat is doing every few seconds, and calls cmux's own hook commands locally. `contrib/example-remote-host-function.fish` shows the shell function that starts it beside the ssh and ends it with the shell, so nothing is configured per session and nothing has to be installed on the remote host.
 
-Which chat it reports is settled exactly rather than guessed: the surface id travels into the remote shell's environment on the command line, so the remote host names the pty that belongs to that terminal, the tmux client on it, and the conversation that client shows. Matching on connection ports instead attributes the wrong chat as soon as a shell owns more than one ssh, which is why it does not.
+```
+cmux terminal
+  ├─ cmux-remote-agent-status         asks the far side, reports here
+  │    └─ cmux hooks claude session-start   binds this chat's row to this surface
+  │       cmux hooks claude prompt-submit   the chat is working
+  │       cmux hooks claude stop            the chat is waiting for you
+  └─ ssh <host>                       the connection whose chat is being reported
+       └─ tmux client → chat
+```
 
-**The reporter has to be the hook's parent.** cmux identifies the agent by the parent of the hook that reported, recording it as `ppid` in `~/.cmuxterm/workstream.jsonl`, and watches that process to decide whether the chat is still working. For a local chat that parent is the agent itself. A pipeline would put a short-lived subshell in between, which dies at once and reads as an agent that has gone, so the payload arrives on a here-string and the long-lived reporter is what cmux sees.
+**The first report has to be a session-start.** It is what binds the row to the surface, and a later event never moves that binding, so a chat reported without one keeps whichever surface it was first seen in. That surface is gone by the next connection, and a row that no longer exists shows nothing however correct the state is. The reporter therefore sends one whenever the chat it is watching changes, which also re-binds a row left pointing at an earlier connection.
 
-**What stays local.** cmux records a lifecycle per surface and draws its badge from that, and a report from outside is refused however it is delivered: the socket checks the connecting process, its Linux CLI carries no hook commands, and a hook run over plain ssh writes the store without the sidebar ever hearing about it. Reporting from inside the terminal, as above, is the only channel that is accepted at all. Whether the badge then renders for a surface whose conversation lives on another machine is cmux's own decision, and one field a remote chat cannot supply is the agent's pid, which cmux knows locally because its wrapper is the agent's parent.
+**The connection settles which chat is being shown.** A chat opened in tmux keeps the environment tmux itself started with, so a marker placed in the login shell stops at the login shell, and a chat opened yesterday carries yesterday's surface id. The ssh connection is visible from both ends for as long as it lasts: the reporter reads the local port of the ssh beside it, and the remote host finds the pty holding that connection, the tmux client on that pty, and the conversation that client is looking at.
+
+**The reporter is the process cmux watches.** cmux records the reporting process against the chat and checks it is alive before showing the chat as working. A pipeline would put a short-lived subshell in that place, which exits at once and reads as an agent that has gone, so the payload arrives on a here-string and the long-lived reporter is what cmux keeps. It lives exactly as long as the terminal holding the connection, which is the same span the chat is reachable for.
+
+**No launch data is sent.** cmux offers to reopen a chat it has launch data for, and the command that would reopen this one runs on another machine. Leaving it out keeps cmux from starting a local chat with a conversation id that only exists on the far side.
+
+**The row stops claiming state when the chat stops being shown.** A detached chat, an ended one, or a host that goes quiet all leave the row saying `running` forever, so two quiet answers in a row close the chat out. One is not enough: a single dropped poll would end a chat that is still working.
 
 ## How it reads the state
 
