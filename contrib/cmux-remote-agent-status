@@ -134,6 +134,11 @@ while :; do
             chat="$sid"
             chat_dir="$dir"
             report session-start "$chat" "$chat_dir"
+            # A session-start puts the chat at `unknown` until something says otherwise, and cmux takes
+            # the two reports in whichever order they finish. Sent back to back they finish together and
+            # the start lands second, which leaves the row saying nothing at all, so the state that
+            # follows is given its own moment.
+            sleep 1
             last=""
         fi
         chat_dir="$dir"
