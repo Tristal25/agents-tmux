@@ -48,6 +48,8 @@ Requires `tmux`, `jq`, `bash` 4 or newer, and Claude Code or Codex. macOS ships 
 
 **Session names are derived, never asked for.** They become `<agent>-<directory>`, numbered when that name is taken. tmux needs a name to reattach by; you do not need to think about it.
 
+**Ten chats a page.** `n` and `p` turn pages, and row 0 rides along on every one. Numbers stay absolute across pages, so what you type matches what you read, and Enter takes the first chat on the page in front of you. Reading the state costs a pass over every transcript, so it happens once and pages are drawn from memory. `AGENT_TMUX_PAGE_SIZE` sets a different size; the page indicator appears once there is more than one page.
+
 **A session lives exactly as long as its chat.** tmux destroys a session when its command exits, so ending the agent removes the row. Detaching keeps it, which is the reason to run agents in tmux at all.
 
 ## Usage
