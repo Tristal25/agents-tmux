@@ -1,0 +1,519 @@
+#!/bin/bash
+# One entry point for persistent coding-agent sessions, Claude Code and Codex alike.
+# A tmux session outlives an ssh drop, so a network change costs a reattach instead of the work.
+#
+# Running it with no arguments is the whole interface: one flat list of every agent and saved
+# conversation, acted on by the number you choose.
+#
+# Each row carries its state, since that decides what choosing it does. `Running` and `Idle` mean a
+# process is alive in tmux and the row attaches to it. `Exited` means only the conversation is left
+# and the row starts an agent on it. `No tmux` means a live agent nobody can attach to, because it
+# was started outside tmux or its session is gone; choosing it ends that agent and reopens the same
+# conversation inside a session. Row 0 starts an agent with nothing loaded.
+#
+# One row per CONVERSATION, and one terminal per chat. Choosing a chat that is already running
+# moves you into the session that holds it, so a second agent is never started on it.
+#
+# Listing and resuming span both agents, since each row carries the agent that wrote it. A NEW
+# session starts Claude Code; `--agent codex` picks the other one.
+#
+# tmux addresses a session by name, since that name is the handle a reattach needs. Supplying one
+# is optional: an omitted name becomes `<agent>-<directory>`, numbered when that is taken.
+set -u
+
+CLAUDE_PROJECTS="$HOME/.claude/projects"
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+# Every directory, since a conversation is worth finding from wherever you happen to be standing.
+SCOPE=all
+DEFAULT_AGENT=claude
+
+# Claude Code registers every running agent under ~/.claude/sessions/<pid>.json, holding the
+# conversation id, the cwd, the tmux session it sits in, and the agent's own published status.
+# That file is what makes the state exact: a process walk can only guess which conversation a pane
+# has open, and file timestamps cannot tell working from waiting.
+#
+# Emits, one line per running agent: sessionId, tmux session, cwd, pid, status, status epoch.
+live_agents() {
+    local f sid tmuxref cwd pid status stamp
+    for f in "$HOME"/.claude/sessions/*.json; do
+        [ -f "$f" ] || continue
+        IFS=$'\t' read -r sid tmuxref cwd pid status stamp < <(jq -r 'select(.sessionId != null) | [.sessionId, (.tmux // "-"), (.cwd // "-"), .pid, (.status // "-"), (((.statusUpdatedAt // 0) / 1000) | floor)] | @tsv' "$f" 2>/dev/null)
+        [ -n "${sid:-}" ] || continue
+        # A file outlives its process, and a recycled pid would otherwise read as running.
+        kill -0 "${pid:-0}" 2>/dev/null || continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$sid" "${tmuxref%%:*}" "$cwd" "$pid" "$status" "$stamp"
+    done
+}
+
+# A working agent appends to its transcript continuously, so a transcript untouched for longer than
+# this is an agent waiting on you rather than one doing something.
+IDLE_AFTER=30
+
+# When the conversation last did any work, which is NOT the same as when its pane last drew. A chat
+# whose main loop waits while a subagent works produces no pane output at all, so tmux reports the
+# session as quiet and the row would read Idle while a dispatched agent is still going. Subagents
+# write under <id>/subagents/, so the newest write across both places is the honest clock.
+work_epoch() {
+    local transcript="$1" newest=0 f
+    [ -f "$transcript" ] && newest=$(date -r "$transcript" +%s)
+    for f in "${transcript%.jsonl}"/subagents/*.jsonl; do
+        [ -f "$f" ] || continue
+        f=$(date -r "$f" +%s)
+        [ "$f" -gt "$newest" ] && newest="$f"
+    done
+    printf '%s' "$newest"
+}
+
+title_of() {
+    local f="$1" t
+    [ -f "$f" ] || return 0
+    # Claude names each session itself and rewrites that name as the work changes, so the newest
+    # `ai-title` describes the task better than any single message does.
+    t=$(jq -r 'select(.type=="ai-title") | .aiTitle' "$f" 2>/dev/null | grep -v '^$' | tail -1)
+    # Without a title, fall back to the last thing typed. `gsub` flattens a multi-line message so
+    # one entry stays one row, and the filter drops the injected shapes (system reminders, command
+    # echoes, caveats) that nobody typed.
+    [ -n "$t" ] || t=$(jq -r 'select(.type=="user") | (if (.message.content|type)=="string" then .message.content else (.message.content[0].text // "") end) | gsub("\\s+"; " ")' "$f" 2>/dev/null \
+        | grep -vE '^$|^ *<|^Caveat:' | tail -1)
+    printf '%s' "$t"
+}
+
+transcript_of() {
+    printf '%s/%s/%s.jsonl' "$CLAUDE_PROJECTS" "$(printf '%s' "$2" | sed 's|/|-|g')" "$1"
+}
+
+# The directory a conversation belongs to, read from the transcript because the project directory
+# name replaces every `/` with `-` and a real dash in a path makes that substitution ambiguous.
+# `head -1` closes the pipe, so jq stops at the first match instead of scanning a 17 MB file.
+cwd_of_transcript() {
+    local d
+    d=$(jq -r 'select(.cwd) | .cwd' "$1" 2>/dev/null | head -1)
+    [ -n "$d" ] || d=$(printf '%s' "$(basename "$(dirname "$1")")" | sed 's|-|/|g')
+    printf '%s' "$d"
+}
+
+# Age reads the same on any host. The clock here runs UTC while the reader is elsewhere, so an
+# absolute stamp invites the wrong arithmetic.
+rel_age() {
+    local secs=$(( $(date +%s) - $1 ))
+    if [ "$secs" -lt 0 ]; then printf 'just now'
+    elif [ "$secs" -lt 60 ]; then printf '%ds ago' "$secs"
+    elif [ "$secs" -lt 3600 ]; then printf '%dm ago' $((secs / 60))
+    elif [ "$secs" -lt 86400 ]; then printf '%dh ago' $((secs / 3600))
+    else printf '%dd ago' $((secs / 86400)); fi
+}
+
+# Rows: epoch, agent, id, state, tmux session, attached, held, pid, directory, info (tab separated)
+#
+# One row per conversation, live or saved. `held` counts the tmux sessions holding it, which keeps
+# every field filled even for a row with no session behind it.
+collect_rows() {
+    local dirs d f id epoch info here now state tmux_name attached
+    local sid cwd
+    local -A act=() att=() running=()
+    now=$(date +%s)
+    here=$(pwd -P)
+
+    while IFS='|' read -r tmux_name epoch attached; do
+        [ -n "${tmux_name:-}" ] || continue
+        act["$tmux_name"]="$epoch"
+        att["$tmux_name"]="$attached"
+    done < <(tmux list-sessions -F '#{session_name}|#{session_activity}|#{session_attached}' 2>/dev/null)
+
+    # One row per CONVERSATION, since that is what you mean to return to. Resuming the same
+    # conversation twice leaves two sessions holding it, and a row each buries every other chat
+    # under repeats of one. The row points at the session that was active most recently and
+    # carries how many hold it, so the others stay reachable through `tmux ls`.
+    local transcript agent_epoch pid status stamp
+    local -A best=() best_at=() held=() cwd_of=() pid_of=() status_of=() stamp_of=()
+    while IFS=$'\t' read -r sid tmux_name cwd pid status stamp; do
+        [ "$SCOPE" = all ] || [ "$cwd" = "$here" ] || continue
+        held["$sid"]=$(( ${held[$sid]:-0} + 1 ))
+        cwd_of["$sid"]="$cwd"
+        # Any agent on this conversation reporting work counts as work, whichever session it sits
+        # in, so a busy one is never masked by an idle sibling.
+        case "$status" in
+            busy | shell) status_of["$sid"]="$status" ;;
+            *) status_of["$sid"]="${status_of[$sid]:-$status}" ;;
+        esac
+        [ "${stamp:-0}" -gt "${stamp_of[$sid]:-0}" ] && stamp_of["$sid"]="$stamp"
+        agent_epoch="${act[$tmux_name]:-0}"
+        if [ "$agent_epoch" -ge "${best_at[$sid]:-0}" ]; then
+            best_at["$sid"]="$agent_epoch"
+            best["$sid"]="$tmux_name"
+            pid_of["$sid"]="$pid"
+        fi
+    done < <(live_agents)
+
+    for sid in "${!best[@]}"; do
+        running["$sid"]=1
+        tmux_name="${best[$sid]}"
+        transcript=$(transcript_of "$sid" "${cwd_of[$sid]}")
+        info=$(title_of "$transcript")
+        # The agent publishes what it is doing, so that is the state: `busy` is a turn in progress,
+        # `shell` a command executing, `idle` a prompt waiting on you. A dispatched subagent leaves
+        # the parent busy while producing no pane output, which is why a timestamp cannot tell them
+        # apart. An older agent that publishes nothing falls back to how recently it wrote.
+        epoch=$(work_epoch "$transcript")
+        [ "${stamp_of[$sid]:-0}" -gt "${epoch:-0}" ] && epoch="${stamp_of[$sid]}"
+        [ "${epoch:-0}" -gt 0 ] || epoch="$now"
+        case "${status_of[$sid]:--}" in
+            busy | shell) state=Running ;;
+            idle)         state=Idle ;;
+            *) if [ $((now - epoch)) -le "$IDLE_AFTER" ]; then state=Running; else state=Idle; fi ;;
+        esac
+        # A live agent with no tmux session behind it was started outside tmux, or its session is
+        # gone. Nothing can be attached to, so the row adopts the process into a new session.
+        if [ "${best_at[$sid]}" -eq 0 ]; then
+            state="No tmux"
+            tmux_name="-"
+        fi
+        printf '%s\tclaude\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$epoch" "$sid" "$state" "$tmux_name" "${att[$tmux_name]:-0}" "${held[$sid]}" \
+            "${pid_of[$sid]:--}" "${cwd_of[$sid]}" "$(printf '%s' "$info" | cut -c1-52)"
+    done
+
+    if [ "$SCOPE" = all ]; then
+        dirs=$(ls -d "$CLAUDE_PROJECTS"/*/ 2>/dev/null)
+    else
+        dirs="$CLAUDE_PROJECTS/$(printf '%s' "$here" | sed 's|/|-|g')"
+    fi
+
+    for d in $dirs; do
+        while read -r f; do
+            [ -f "$f" ] || continue
+            id=$(basename "$f" .jsonl)
+            [ -z "${running[$id]:-}" ] || continue
+            epoch=$(date -r "$f" +%s)
+            printf '%s\tclaude\t%s\tExited\t-\t0\t1\t-\t%s\t%s\n' \
+                "$epoch" "$id" "$(cwd_of_transcript "$f")" \
+                "$(printf '%s' "$(title_of "$f")" | cut -c1-52)"
+        done < <(ls -1t "$d"/*.jsonl 2>/dev/null)
+    done
+
+    # Codex keeps its own index; list its rollouts where they exist.
+    while read -r f; do
+        [ -f "$f" ] || continue
+        printf '%s\tcodex\t%s\tExited\t-\t0\t1\t-\t%s\t%s\n' "$(date -r "$f" +%s)" "$(basename "$f" .jsonl)" \
+            "$(jq -r 'select(.cwd) | .cwd' "$f" 2>/dev/null | head -1 || printf '%s' "$HOME")" \
+            "$(basename "$(dirname "$f")")"
+    done < <(find "$CODEX_HOME" -maxdepth 4 \( -name "rollout-*.jsonl" -o -path "*/sessions/*.jsonl" \) 2>/dev/null)
+}
+
+# Read one line with ESC as cancel. Arrow keys also start with ESC, so a bare escape is only
+# treated as cancel when nothing follows it within the timeout.
+# Sets REPLY_LINE and returns 130 on cancel.
+read_line() {
+    local prompt="$1" allow="$2" ch rest
+    REPLY_LINE=""
+    printf '%s' "$prompt"
+    while IFS= read -rsn1 ch; do
+        case "$ch" in
+            $'\e')
+                rest=""
+                read -rsn2 -t 0.05 rest 2>/dev/null || true
+                [ -n "$rest" ] && continue
+                printf '\n'
+                return 130
+                ;;
+            '' | $'\n' | $'\r') printf '\n'; return 0 ;;
+            $'\177' | $'\b')
+                if [ -n "$REPLY_LINE" ]; then REPLY_LINE="${REPLY_LINE%?}"; printf '\b \b'; fi
+                ;;
+            *)
+                case "$allow" in
+                    digits) case "$ch" in [0-9]) ;; *) continue ;; esac ;;
+                esac
+                REPLY_LINE+="$ch"
+                printf '%s' "$ch"
+                ;;
+        esac
+    done
+    printf '\n'
+    return 0
+}
+
+# A path reads faster with the home part collapsed, and a long one is more recognisable by its
+# tail than by the root every row shares.
+short_dir() {
+    local d="$1" home
+    home=$(cd "$HOME" 2>/dev/null && pwd -P)
+    case "$d" in
+        "$home") d="~" ;;
+        "$home"/*) d="~/${d#$home/}" ;;
+        "$HOME") d="~" ;;
+        "$HOME"/*) d="~/${d#$HOME/}" ;;
+    esac
+    [ "${#d}" -le 30 ] || d="…${d: -29}"
+    printf '%s' "$d"
+}
+
+# Each entry is kind <tab> argument <tab> directory, since opening a row needs the directory the
+# conversation belongs to, not the one the list was run from.
+ACTIONS=()
+print_list() {
+    ACTIONS=()
+    local n=0 epoch agent id state tmux_name attached held pid info dir mark
+    printf ' #  %-8s %-11s %-11s %-31s %s\n' AGENT STATE 'LAST USED' DIRECTORY TASK
+    while IFS=$'\t' read -r epoch agent id state tmux_name attached held pid dir info; do
+        n=$((n + 1))
+        # Whether a terminal is already looking at it changes what choosing it does to that
+        # terminal, so it earns a mark. How many tmux sessions hold the conversation does not.
+        mark="$state"
+        [ "${attached:-0}" -gt 0 ] && mark="$mark *"
+        if [ "$state" = "No tmux" ]; then
+            ACTIONS+=("$(printf 'takeover\t%s:%s\t%s' "$pid" "$id" "$dir")")
+        elif [ "$tmux_name" = "-" ]; then
+            ACTIONS+=("$(printf 'resume\t%s:%s\t%s' "$agent" "$id" "$dir")")
+        else
+            ACTIONS+=("$(printf 'attach\t%s\t%s' "$tmux_name" "$dir")")
+        fi
+        printf '%2d  %-8s %-11s %-11s %-31s %s\n' \
+            "$n" "$agent" "$mark" "$(rel_age "$epoch")" "$(short_dir "$dir")" "${info:-(no title yet)}"
+    done < <(collect_rows | sort -rn)
+    ACTIONS+=("$(printf 'new\t%s\t%s' "$DEFAULT_AGENT" "$(pwd -P)")")
+    printf '%2d  %-8s %-11s %-11s %-31s %s\n' 0 "$DEFAULT_AGENT" New "-" "$(short_dir "$(pwd -P)")" "empty conversation"
+    printf '\n*  another terminal is looking at this chat right now\n'
+    printf '\nEvery directory is listed. --here narrows it to %s.\n' "$(short_dir "$(pwd -P)")"
+    return 0
+}
+
+# A session name is bookkeeping rather than something to choose, so it is derived from the
+# directory the conversation belongs to and never asked for.
+# tmux rejects `.` and `:` in a session name, so anything outside its alphabet becomes a dash.
+auto_name() {
+    local agent="$1" base n=1 candidate
+    base=$(basename "${2:-$(pwd -P)}" | tr -c 'A-Za-z0-9_-' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')
+    candidate="${base:+$agent-$base}"
+    candidate="${candidate:-$agent}"
+    while tmux has-session -t "=$candidate" 2>/dev/null; do
+        n=$((n + 1))
+        candidate="${base:+$agent-$base}-$n"
+    done
+    printf '%s' "$candidate"
+}
+
+# A chat belongs to one terminal at a time. Two terminals on one session share a single view sized
+# to the smaller of them, so both get a cramped window and every keystroke reaches the same prompt.
+# So the session MOVES to the terminal asking for it: `-d` detaches whichever terminal held it,
+# leaving that one at its shell with the agent still running here.
+#
+# Inside tmux, `switch-client` moves the client you are using; attaching there would stack a tmux
+# inside a tmux, with two status bars and a doubled prefix key.
+attach_session() {
+    local target="$1"
+    if [ -n "${TMUX:-}" ]; then
+        exec tmux switch-client -t "=$target"
+    fi
+    if [ "${SHARE:-0}" = 1 ]; then
+        exec tmux attach -t "=$target"
+    fi
+    exec tmux attach -dt "=$target"
+}
+
+# The tmux session holding a conversation right now, newest activity first, empty when none does.
+#
+# Checked before starting an agent on a saved conversation: the list is a snapshot, and a row that
+# read `Exited` a moment ago can be live by the time you choose it. Starting a second agent on the
+# same conversation is what leaves several sessions holding one chat.
+live_session_for() {
+    local want="$1" sid tm cwd act best="" best_at=0
+    while IFS=$'\t' read -r sid tm cwd; do
+        [ "$sid" = "$want" ] || continue
+        [ "$tm" = "-" ] && continue
+        tmux has-session -t "=$tm" 2>/dev/null || continue
+        act=$(tmux display -p -t "=$tm" '#{session_activity}' 2>/dev/null)
+        if [ "${act:-0}" -ge "$best_at" ]; then best_at="${act:-0}"; best="$tm"; fi
+    done < <(live_agents)
+    printf '%s' "$best"
+}
+
+# The session is created in the conversation's own directory, so choosing a row from anywhere
+# lands the agent in the tree that conversation is about.
+start_session() {
+    local session="$1" agent="$2" which="$3" dir="${4:-$(pwd -P)}" cmd
+    if tmux has-session -t "=$session" 2>/dev/null; then
+        attach_session "$session"
+        return 0
+    fi
+    [ -d "$dir" ] || { printf 'no such directory: %s\n' "$dir" >&2; return 2; }
+    # A session holds exactly one conversation for its whole life, so a failed resume ends it
+    # rather than falling back to a fresh chat: the fallback would leave the session holding a
+    # conversation nobody asked for, under a name that says otherwise. The pause is there because
+    # the session closes as soon as the command returns, taking the message with it.
+    local failed='{ printf "\\ncould not open that conversation\\n"; read -rsn1 -p "press any key"; }'
+    if [ "$agent" = codex ]; then
+        case "$which" in
+            "")      cmd="codex resume --last || $failed" ;;
+            --pick)  cmd='codex resume' ;;
+            --new)   cmd='codex' ;;
+            *)       cmd="codex resume '$which' || $failed" ;;
+        esac
+    else
+        case "$which" in
+            "")      cmd="claude --continue || $failed" ;;
+            --pick)  cmd='claude --resume' ;;
+            --new)   cmd='claude' ;;
+            *)       cmd="claude --resume '$which' || $failed" ;;
+        esac
+    fi
+    if [ -n "${TMUX:-}" ]; then
+        tmux new-session -d -s "$session" -c "$dir" "$cmd" && exec tmux switch-client -t "=$session"
+        return 1
+    fi
+    exec tmux new -s "$session" -c "$dir" "$cmd"
+}
+
+cmd_pick() {
+    print_list
+    # Row 0 is the last entry of ACTIONS, so a list with nothing saved still has that one.
+    local default=1
+    [ "${#ACTIONS[@]}" -gt 1 ] || default=0
+    read_line "Number [$default], 0 for a new chat (esc to quit): " digits || { echo "cancelled"; return 0; }
+    local choice="${REPLY_LINE:-$default}"
+    case "$choice" in
+        *[!0-9]*) echo "Not a number: $choice"; return 1 ;;
+    esac
+    [ "$choice" -lt "${#ACTIONS[@]}" ] || { echo "Out of range: $choice"; return 1; }
+
+    # Row 0 sits last in ACTIONS while reading as first on screen.
+    local index=$((choice - 1))
+    [ "$choice" -eq 0 ] && index=$(( ${#ACTIONS[@]} - 1 ))
+
+    local kind arg dir agent
+    IFS=$'\t' read -r kind arg dir <<< "${ACTIONS[$index]}"
+    case "$kind" in
+        attach) attach_session "$arg" ;;
+        takeover)
+                # A running process cannot be moved onto another terminal: reptyr is the tool for
+                # that and it refuses this shape, since the agent shares a process group with its
+                # launcher. So the conversation moves rather than the process. The old agent is
+                # asked to stop first, because two agents on one conversation both append to the
+                # same transcript.
+                local pid="${arg%%:*}" sid="${arg#*:}" pgid tty_sid waited=0 status
+                status=$(jq -r '.status // "-"' "$HOME/.claude/sessions/$pid.json" 2>/dev/null)
+                case "$status" in
+                    busy | shell)
+                        printf 'That chat is %s right now, so ending it drops whatever it is mid-way through.\n' "$status"
+                        read_line 'enter = end it and reopen under tmux, esc = cancel: ' any \
+                            || { echo "cancelled"; return 0; }
+                        ;;
+                esac
+                pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+                tty_sid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ')
+                # Closing a terminal ends the whole foreground group, so signalling the group is
+                # what the agent already handles cleanly. The guard keeps a login shell out of it
+                # when the agent happens to be its own session leader.
+                if [ -n "$pgid" ] && [ "$pgid" != "$tty_sid" ]; then
+                    kill -TERM "-$pgid" 2>/dev/null
+                else
+                    kill -TERM "$pid" 2>/dev/null
+                fi
+                printf 'asked pid %s to finish' "$pid"
+                while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+                    sleep 1; waited=$((waited + 1)); printf '.'
+                done
+                if kill -0 "$pid" 2>/dev/null; then
+                    printf '\nit is still there after %ss, forcing it\n' "$waited"
+                    kill -KILL "$pid" 2>/dev/null
+                    sleep 1
+                else
+                    printf ' gone after %ss\n' "$waited"
+                fi
+                start_session "$(auto_name "$DEFAULT_AGENT" "$dir")" "$DEFAULT_AGENT" "$sid" "$dir" ;;
+        new)    # The directory is the one thing worth asking about, since a new chat has no
+                # history to take it from. Enter accepts where the list was run from.
+                read_line "directory [$(short_dir "$dir")] (esc to quit): " any \
+                    || { echo "cancelled"; return 0; }
+                if [ -n "$REPLY_LINE" ]; then
+                    case "$REPLY_LINE" in
+                        "~") dir="$HOME" ;;
+                        "~/"*) dir="$HOME/${REPLY_LINE#\~/}" ;;
+                        /*) dir="$REPLY_LINE" ;;
+                        *) dir="$(pwd -P)/$REPLY_LINE" ;;
+                    esac
+                fi
+                # Claude keys its history off the cwd string, so `~/x` and `/home/you/x` would
+                # file the same directory under two names. Resolving to the real path keeps one.
+                dir=$(cd "$dir" 2>/dev/null && pwd -P) \
+                    || { printf 'no such directory: %s\n' "$REPLY_LINE"; return 1; }
+                start_session "$(auto_name "$arg" "$dir")" "$arg" --new "$dir" ;;
+        resume) agent="${arg%%:*}"
+                arg="${arg#*:}"
+                local live
+                live=$(live_session_for "$arg")
+                if [ -n "$live" ]; then
+                    printf 'already running in %s, moving you there\n' "$live"
+                    attach_session "$live"
+                    return 0
+                fi
+                [ "$agent" = codex ] && arg="${arg:---pick}"
+                start_session "$(auto_name "$agent" "$dir")" "$agent" "$arg" "$dir" ;;
+    esac
+}
+
+usage() {
+    cat <<EOF
+Usage:
+  agent-tmux                      every chat, from every directory; act on the number you choose
+  agent-tmux --new                start a fresh chat here straight away
+  agent-tmux --new --agent codex  the same, running Codex
+  agent-tmux --here               narrow the list to the current directory
+  agent-tmux ls                   the same list, without the prompt
+  agent-tmux <name>               open that tmux session, or create it on the newest conversation
+  agent-tmux <name> <id>          create it resuming that conversation id
+
+Flags, in any position: -n/--new start fresh, --here narrow to the current directory, --agent
+claude|codex choose which agent a new chat runs, --pick hand off to the agent's own picker,
+--name <name> set the tmux session name, --share let two terminals draw the same session.
+
+Columns: agent, state, how long ago it was used, the directory it works on, and the task Claude
+named it after. States: Running (producing output now), Idle (alive, waiting on you), Exited (only
+the conversation is left), No tmux (alive but outside tmux, so choosing it ends that agent and
+reopens the conversation in a session). \`*\` marks a chat
+another terminal is looking at right now. Choosing a Running or Idle row keeps a build or an answer
+in flight, where every other row starts a new process.
+
+Choosing a row moves you into that conversation's own directory. Row 0 starts an empty chat and
+asks which directory to work in, defaulting to the one you ran this from. tmux session names are
+derived from the directory and never asked for.
+EOF
+}
+
+MODE=""
+NEW=0
+NAME=""
+TARGET=""
+SHARE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h | --help | help) usage; exit 0 ;;
+        -a | --all)         SCOPE=all ;;
+        --here | --cwd)     SCOPE=cwd ;;
+        -n | --new)         NEW=1 ;;
+        --share)            SHARE=1 ;;
+        --pick)             TARGET=--pick ;;
+        --name)             shift; NAME="${1:-}" ;;
+        --agent)            shift
+                            case "${1:-}" in
+                                claude | codex) DEFAULT_AGENT="$1" ;;
+                                *) echo "agent must be claude or codex: ${1:-}" >&2; exit 2 ;;
+                            esac ;;
+        --codex)            DEFAULT_AGENT=codex ;;
+        ls | list)          MODE=list ;;
+        pick | select)      MODE=pick ;;
+        *)                  if [ -z "$NAME" ]; then NAME="$1"; else TARGET="$1"; fi ;;
+    esac
+    shift
+done
+
+# With no name, no target and no explicit mode, the list is the entry point.
+[ -n "$MODE" ] || if [ "$NEW" = 1 ] || [ -n "$NAME" ] || [ -n "$TARGET" ]; then MODE=start; else MODE=pick; fi
+
+case "$MODE" in
+    list) print_list ;;
+    pick) cmd_pick ;;
+    *)    [ "$NEW" = 1 ] && TARGET=--new
+          start_session "${NAME:-$(auto_name "$DEFAULT_AGENT" "$(pwd -P)")}" "$DEFAULT_AGENT" \
+              "$TARGET" "$(pwd -P)" ;;
+esac
