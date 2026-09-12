@@ -52,6 +52,27 @@ done
 REMOTE
 }
 
+# The process cmux can watch on this machine for this chat: the ssh that carries it.
+note_pid() {
+    local sid="$1" store="$HOME/.cmuxterm/claude-hook-sessions.json" ssh_pid
+    [ -f "$store" ] || return 0
+    ssh_pid=$(pgrep -P $PPID -x ssh 2>/dev/null | head -1)
+    [ -n "$ssh_pid" ] || return 0
+    /usr/bin/python3 - "$store" "$sid" "$ssh_pid" <<'PATCH'
+import json, sys
+store, sid, pid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    data = json.load(open(store))
+except Exception:
+    sys.exit(0)
+entry = data.get("sessions", {}).get(sid)
+if entry is None or entry.get("pid") == pid:
+    sys.exit(0)
+entry["pid"] = pid
+json.dump(data, open(store, "w"), indent=1)
+PATCH
+}
+
 # `busy` and `shell` are a turn or a command in flight; anything else is waiting on you.
 event_for() {
     case "$1" in
@@ -75,6 +96,11 @@ while :; do
                 prompt-submit) "$CLI" set-status claude_code Running --icon bolt --color '#4c8dff' --priority 80 >/dev/null 2>&1 ;;
                 *) "$CLI" clear-status claude_code >/dev/null 2>&1 ;;
             esac
+            # cmux records a lifecycle per surface and checks the agent is alive before showing it
+            # working. It learns that pid by being the agent's parent, which no remote chat can
+            # offer, so the ssh holding this connection stands in: it lives exactly as long as the
+            # chat is reachable from here, which is the same question the check is asking.
+            note_pid "$sid"
             last="$event"
         fi
     fi
