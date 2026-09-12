@@ -9,7 +9,8 @@
 # process is alive in tmux and the row attaches to it. `Exited` means only the conversation is left
 # and the row starts an agent on it. `No tmux` means a live agent nobody can attach to, because it
 # was started outside tmux or its session is gone; choosing it ends that agent and reopens the same
-# conversation inside a session. Row 0 starts an agent with nothing loaded.
+# conversation inside a session. `Open` is a Codex conversation a session holds, which is as far as
+# Codex state goes. Rows `a` and `b` start an agent with nothing loaded, Claude or Codex.
 #
 # One row per CONVERSATION, and one terminal per chat. Choosing a chat that is already running
 # moves you into the session that holds it, so a second agent is never started on it.
@@ -266,12 +267,13 @@ read_line() {
             *)
                 case "$allow" in
                     digits) case "$ch" in [0-9]) ;; *) continue ;; esac ;;
-                    # Page turns are single letters, so one of them ends the line by itself and a
-                    # digit typed afterwards can still only build a number.
-                    digits+np)
+                    # A row number can run to several digits, while page turns and the new-chat rows
+                    # are single letters that end the line on their own. A letter typed after a
+                    # digit is ignored, so what was already entered can still only build a number.
+                    pick)
                         case "$ch" in
                             [0-9]) ;;
-                            n | N | p | P)
+                            n | N | p | P | a | A | b | B)
                                 [ -n "$REPLY_LINE" ] && continue
                                 REPLY_LINE="$ch"; printf '%s\n' "$ch"; return 0 ;;
                             *) continue ;;
@@ -330,25 +332,31 @@ load_rows() {
         LINES+=("$(printf '%2d  %-8s %-11s %-11s %-31s %s' \
             "$n" "$agent" "$mark" "$(rel_age "$epoch")" "$(short_dir "$dir")" "${info:-(no title yet)}")")
     done < <(collect_rows | sort -rn)
-    ACTIONS+=("$(printf 'new\t%s\t%s' "$DEFAULT_AGENT" "$(pwd -P)")")
-    LINES+=("$(printf '%2d  %-8s %-11s %-11s %-31s %s' \
-        0 "$DEFAULT_AGENT" New "-" "$(short_dir "$(pwd -P)")" "empty conversation")")
+    # Starting a chat is a choice of agent as much as of directory, so each one gets a letter and
+    # keeps the numbers for conversations that already exist.
+    local agent letter
+    for agent in claude codex; do
+        [ "$agent" = claude ] && letter=a || letter=b
+        ACTIONS+=("$(printf 'new\t%s\t%s' "$agent" "$(pwd -P)")")
+        LINES+=("$(printf '%2s  %-8s %-11s %-11s %-31s %s' \
+            "$letter" "$agent" New "-" "$(short_dir "$(pwd -P)")" "empty conversation")")
+    done
     return 0
 }
 
 header() { printf ' #  %-8s %-11s %-11s %-31s %s\n' AGENT STATE 'LAST USED' DIRECTORY TASK; }
 
-# Row 0 rides along on every page, since starting a chat is worth reaching without paging to find
-# it. Numbers stay absolute across pages, so what you type matches what you read.
+# The two new-chat rows ride along on every page, since starting one is worth reaching without
+# paging to find it. Numbers stay absolute across pages, so what you type matches what you read.
 print_page() {
-    local start="$1" chats=$(( ${#LINES[@]} - 1 )) i last
+    local start="$1" chats=$(( ${#LINES[@]} - 2 )) i last
     last=$(( start + PAGE_SIZE ))
     [ "$last" -gt "$chats" ] && last="$chats"
     header
     for (( i = start; i < last; i++ )); do
         printf '%s\n' "${LINES[$i]}"
     done
-    printf '%s\n' "${LINES[$chats]}"
+    printf '%s\n%s\n' "${LINES[$chats]}" "${LINES[$((chats + 1))]}"
     if [ "$chats" -gt "$PAGE_SIZE" ]; then
         printf '\nchats %d-%d of %d, page %d/%d\n' $(( start + 1 )) "$last" "$chats" \
             $(( start / PAGE_SIZE + 1 )) $(( (chats + PAGE_SIZE - 1) / PAGE_SIZE ))
@@ -359,10 +367,10 @@ print_page() {
 
 print_list() {
     load_rows
-    local chats=$(( ${#LINES[@]} - 1 )) i
+    local chats=$(( ${#LINES[@]} - 2 )) i
     header
     for (( i = 0; i < chats; i++ )); do printf '%s\n' "${LINES[$i]}"; done
-    printf '%s\n' "${LINES[$chats]}"
+    printf '%s\n%s\n' "${LINES[$chats]}" "${LINES[$((chats + 1))]}"
     printf '\n*  another terminal is looking at this chat right now\n'
     printf '\nEvery directory is listed. --here narrows it to %s.\n' "$(short_dir "$(pwd -P)")"
     return 0
@@ -468,16 +476,17 @@ start_session() {
 
 cmd_pick() {
     load_rows
-    local chats=$(( ${#LINES[@]} - 1 )) start=0 default choice prompt
+    local chats=$(( ${#LINES[@]} - 2 )) start=0 default choice prompt index=-1
     while :; do
         print_page "$start"
         # Enter takes the first chat on the page you are looking at, so the default follows you.
         default=$(( start + 1 ))
-        [ "$chats" -gt 0 ] || default=0
-        prompt=$(printf 'Number [%d], 0 for a new chat' "$default")
-        [ "$chats" -gt "$PAGE_SIZE" ] && prompt="$prompt, n/p for next/previous page"
-        read_line "$prompt (esc to quit): " digits+np || { echo "cancelled"; return 0; }
-        case "$REPLY_LINE" in
+        if [ "$chats" -gt 0 ]; then prompt=$(printf 'Number [%d]' "$default")
+        else prompt='a'; default=a; prompt='Choice [a]'; fi
+        prompt="$prompt, a new claude chat, b new codex chat"
+        [ "$chats" -gt "$PAGE_SIZE" ] && prompt="$prompt, n/p page"
+        read_line "$prompt (esc to quit): " pick || { echo "cancelled"; return 0; }
+        case "${REPLY_LINE:-$default}" in
             n | N)
                 if [ $(( start + PAGE_SIZE )) -lt "$chats" ]; then start=$(( start + PAGE_SIZE ))
                 else printf 'already on the last page\n'; fi
@@ -486,18 +495,19 @@ cmd_pick() {
                 if [ "$start" -gt 0 ]; then start=$(( start - PAGE_SIZE ))
                 else printf 'already on the first page\n'; fi
                 printf '\n'; continue ;;
+            a | A) index="$chats"; break ;;
+            b | B) index=$(( chats + 1 )); break ;;
         esac
         choice="${REPLY_LINE:-$default}"
         case "$choice" in
-            *[!0-9]*) printf 'Not a number: %s\n\n' "$choice"; continue ;;
+            *[!0-9]* | '') printf 'Not a choice: %s\n\n' "$choice"; continue ;;
         esac
-        [ "$choice" -lt "${#ACTIONS[@]}" ] && break
+        if [ "$choice" -ge 1 ] && [ "$choice" -le "$chats" ]; then
+            index=$(( choice - 1 ))
+            break
+        fi
         printf 'Out of range: %s\n\n' "$choice"
     done
-
-    # Row 0 sits last in ACTIONS while reading as first on screen.
-    local index=$((choice - 1))
-    [ "$choice" -eq 0 ] && index=$(( ${#ACTIONS[@]} - 1 ))
 
     local kind arg dir agent
     IFS=$'\t' read -r kind arg dir <<< "${ACTIONS[$index]}"
@@ -583,7 +593,8 @@ cmd_pick() {
 usage() {
     cat <<EOF
 Usage:
-  agent-tmux                      every chat, from every directory; act on the number you choose
+  agent-tmux                      every chat, from every directory; a number opens one,
+                                  a starts a new Claude chat, b a new Codex one
   agent-tmux --new                start a fresh chat here straight away
   agent-tmux --new --agent codex  the same, running Codex
   agent-tmux --here               narrow the list to the current directory
@@ -602,9 +613,9 @@ reopens the conversation in a session). \`*\` marks a chat
 another terminal is looking at right now. Choosing a Running or Idle row keeps a build or an answer
 in flight, where every other row starts a new process.
 
-Choosing a row moves you into that conversation's own directory. Row 0 starts an empty chat and
-asks which directory to work in, defaulting to the one you ran this from. tmux session names are
-derived from the directory and never asked for.
+Choosing a row moves you into that conversation's own directory. \`a\` starts an empty Claude chat and
+\`b\` an empty Codex one, both asking which directory to work in and defaulting to the one you ran this
+from. tmux session names are derived from the directory and never asked for.
 EOF
 }
 

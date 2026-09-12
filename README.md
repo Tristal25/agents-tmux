@@ -10,7 +10,8 @@ Run it with no arguments and it prints one flat list: every live agent, every sa
  2  claude   Idle *      16m ago     ~/notes                         Weekly review outline
  3  claude   No tmux     4m ago      ~/scripts                       One-off log parser
  4  claude   Exited      5h ago      ~/service-api                   Token refresh race
- 0  claude   New         -           ~                               empty conversation
+ a  claude   New         -           ~                               empty conversation
+ b  codex    New         -           ~                               empty conversation
 
 *  another terminal is looking at this chat right now
 ```
@@ -37,7 +38,7 @@ Requires `tmux`, `jq`, `bash` 4 or newer, and Claude Code or Codex. macOS ships 
 | `No tmux` | alive, started outside tmux, so no session holds it | ends that agent, reopens the conversation in a session |
 | `Open` | a Codex conversation a tmux session holds | moves that session to your terminal |
 | `Exited` | the conversation is saved with no agent left | starts an agent on it |
-| `New` | row 0 | asks for a directory, then starts an empty chat |
+| `New` | rows `a` and `b` | asks for a directory, then starts an empty chat on that agent |
 
 `Running` and `Idle` come from the agent's own published status rather than from terminal output or file timestamps, which is what makes a chat whose subagent is working read as `Running` while its screen sits still.
 
@@ -49,14 +50,14 @@ Requires `tmux`, `jq`, `bash` 4 or newer, and Claude Code or Codex. macOS ships 
 
 **Session names are derived, never asked for.** They become `<agent>-<directory>`, numbered when that name is taken. tmux needs a name to reattach by; you do not need to think about it.
 
-**Ten chats a page.** `n` and `p` turn pages, and row 0 rides along on every one. Numbers stay absolute across pages, so what you type matches what you read, and Enter takes the first chat on the page in front of you. Reading the state costs a pass over every transcript, so it happens once and pages are drawn from memory. `AGENT_TMUX_PAGE_SIZE` sets a different size; the page indicator appears once there is more than one page.
+**Ten chats a page.** `n` and `p` turn pages, and the two new-chat rows ride along on every one. Numbers stay absolute across pages, so what you type matches what you read, and Enter takes the first chat on the page in front of you. Reading the state costs a pass over every transcript, so it happens once and pages are drawn from memory. `AGENT_TMUX_PAGE_SIZE` sets a different size; the page indicator appears once there is more than one page.
 
 **A session lives exactly as long as its chat.** tmux destroys a session when its command exits, so ending the agent removes the row. Detaching keeps it, which is the reason to run agents in tmux at all.
 
 ## Usage
 
 ```
-agent-tmux                      the list, then act on the number you choose
+agent-tmux                      the list; a number opens a chat, a or b starts a new one
 agent-tmux --new                start a fresh chat here straight away
 agent-tmux --new --agent codex  the same, running Codex
 agent-tmux --here               narrow the list to the current directory
