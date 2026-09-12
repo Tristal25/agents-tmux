@@ -88,7 +88,11 @@ while :; do
         status=${state##*$'\t'}
         event=$(event_for "$status")
         if [ "$event" != "$last" ]; then
-            printf '{"session_id":"%s","cwd":"%s"}' "$sid" "$PWD" | "$CLI" hooks claude "$event" >/dev/null 2>&1
+            # cmux identifies the agent by the parent of the hook that reported, and watches that
+            # process to decide whether the chat is still working. A pipeline would make some
+            # short-lived subshell the parent, which dies at once and reads as an agent that has
+            # gone, so the payload arrives on a here-string and this loop is the parent.
+            "$CLI" hooks claude "$event" >/dev/null 2>&1 <<<"$(printf '{"session_id":"%s","cwd":"%s"}' "$sid" "$PWD")"
             # The hook drives cmux's own lifecycle. A status entry is the documented way to put text
             # on a row, so both are set: whichever the sidebar draws for a remote surface, the row
             # says what the chat is doing.

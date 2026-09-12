@@ -169,6 +169,8 @@ So the reporter lives inside the terminal cmux started, and asks the remote host
 
 Which chat it reports is settled exactly rather than guessed: the surface id travels into the remote shell's environment on the command line, so the remote host names the pty that belongs to that terminal, the tmux client on it, and the conversation that client shows. Matching on connection ports instead attributes the wrong chat as soon as a shell owns more than one ssh, which is why it does not.
 
+**The reporter has to be the hook's parent.** cmux identifies the agent by the parent of the hook that reported, recording it as `ppid` in `~/.cmuxterm/workstream.jsonl`, and watches that process to decide whether the chat is still working. For a local chat that parent is the agent itself. A pipeline would put a short-lived subshell in between, which dies at once and reads as an agent that has gone, so the payload arrives on a here-string and the long-lived reporter is what cmux sees.
+
 **What stays local.** cmux records a lifecycle per surface and draws its badge from that, and a report from outside is refused however it is delivered: the socket checks the connecting process, its Linux CLI carries no hook commands, and a hook run over plain ssh writes the store without the sidebar ever hearing about it. Reporting from inside the terminal, as above, is the only channel that is accepted at all. Whether the badge then renders for a surface whose conversation lives on another machine is cmux's own decision, and one field a remote chat cannot supply is the agent's pid, which cmux knows locally because its wrapper is the agent's parent.
 
 ## How it reads the state
