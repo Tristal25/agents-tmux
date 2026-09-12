@@ -35,6 +35,7 @@ Requires `tmux`, `jq`, `bash` 4 or newer, and Claude Code or Codex. macOS ships 
 | `Running` | a turn is in progress, or a command is executing | moves the session to your terminal |
 | `Idle` | the agent is alive with a prompt waiting on you | moves the session to your terminal |
 | `No tmux` | alive, started outside tmux, so no session holds it | ends that agent, reopens the conversation in a session |
+| `Open` | a Codex conversation a tmux session holds | moves that session to your terminal |
 | `Exited` | the conversation is saved with no agent left | starts an agent on it |
 | `New` | row 0 | asks for a directory, then starts an empty chat |
 
@@ -110,5 +111,5 @@ A registry entry outlives its process, so every pid is checked before its row is
 
 ## Limits
 
-- Codex support covers listing and resuming its rollouts. Its status is not published the way Claude Code's is, so a Codex row shows `Exited` until you open it.
+- Codex publishes no status, so a Codex row reads `Open` when a tmux session holds it and `Exited` otherwise, without splitting working from waiting. A session this tool created names the conversation in its start command; any other session running codex is placed by its working directory, and the newest rollout there is credited with it.
 - A `No tmux` chat cannot be moved into tmux while it runs. Relocating a live process onto another terminal is what `reptyr` is for, and it declines this shape: the agent shares a process group with its launcher, and stealing the whole terminal session needs privileges it does not get. So the row ends that agent and reopens the same conversation under tmux instead.
