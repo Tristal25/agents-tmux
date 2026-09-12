@@ -5,7 +5,8 @@
 # The terminal reads notifications out of the byte stream (OSC 9), so a sequence written to the
 # pane's tty crosses the ssh connection and reaches the app drawing it. tmux would otherwise
 # consume the sequence, so inside tmux it travels wrapped in a passthrough DCS, which needs
-# `allow-passthrough on`. Any `\033` inside that wrapper has to be doubled, per tmux's rule.
+# `allow-passthrough on`. Any `\033` inside that wrapper has to be doubled, per tmux's rule, and
+# the sequence ends on a BEL so the only escape left to double is its introducer.
 #
 # Reads the hook payload on stdin and takes the title from `$1`, so one script serves several hook
 # events. Silence is the correct behaviour when no tty is attached (a headless or piped run).
@@ -22,18 +23,24 @@ BODY=$(printf '%s' "$PAYLOAD" | jq -r '.message // .reason // empty' 2>/dev/null
 CWD=$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null)
 [ -n "$CWD" ] && BODY="$BODY  ($(basename "$CWD"))"
 
-# A hook reads its payload from a pipe, so `tty` finds no terminal. The controlling terminal is
-# inherited from the agent that spawned the hook, and `ps` reports that one.
-TTY=$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')
-case "$TTY" in
-    pts/* | tty*) TTY="/dev/$TTY" ;;
-    *) exit 0 ;;
-esac
-[ -w "$TTY" ] || exit 0
+# A hook is spawned without a controlling terminal of its own, so `tty` and its own `ps` entry both
+# come back empty. The agent that spawned it owns the pane, so the terminal is the first one found
+# walking up the ancestry.
+TTY=""
+pid=$$
+for _ in 1 2 3 4 5 6; do
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] || break
+    candidate=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$candidate" in
+        pts/* | tty*) TTY="/dev/$candidate"; break ;;
+    esac
+done
+[ -n "$TTY" ] && [ -w "$TTY" ] || exit 0
 
 if [ -n "${TMUX:-}" ]; then
-    printf '\033Ptmux;\033\033]9;%s\033\033\\\033\\' "$BODY" > "$TTY"
+    printf '\033Ptmux;\033\033]9;%s\007\033\\' "$BODY" > "$TTY"
 else
-    printf '\033]9;%s\033\\' "$BODY" > "$TTY"
+    printf '\033]9;%s\007' "$BODY" > "$TTY"
 fi
 exit 0
