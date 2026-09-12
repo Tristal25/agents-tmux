@@ -15,9 +15,31 @@
 # tmux would consume either sequence, so inside tmux they travel wrapped in a passthrough, which
 # needs `allow-passthrough on`. Each escape inside that wrapper is doubled, per tmux's rule, and the
 # sequence ends on a BEL so its introducer is the only one to double.
+#
+# A chat waiting for an answer is the one state the agent's own registry cannot express: a pending
+# permission or question sits inside a turn, so the chat still reads as working. The event that knows
+# about it is this one, so it leaves a file naming the conversation, and the next prompt or turn end
+# removes it. A reporter watching from another machine reads that file to label the row.
 set -u
 
 MODE="${1:-notify}"
+
+PAYLOAD=""
+[ -t 0 ] || PAYLOAD=$(cat 2>/dev/null)
+
+WAITING_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/agent-tmux/waiting"
+SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty' 2>/dev/null)
+
+mark_waiting() {
+    [ -n "$SESSION" ] || return 0
+    mkdir -p "$WAITING_DIR" 2>/dev/null || return 0
+    : > "$WAITING_DIR/$SESSION"
+}
+
+clear_waiting() {
+    [ -n "$SESSION" ] || return 0
+    rm -f "$WAITING_DIR/$SESSION" 2>/dev/null
+}
 
 # A hook is spawned without a controlling terminal of its own, so `tty` and its own `ps` entry both
 # come back empty. The agent that spawned it owns the pane, so the terminal is the first one found
@@ -36,6 +58,13 @@ find_tty() {
     return 1
 }
 
+# The file is written before the terminal is looked for, so a chat with no terminal attached still
+# records what it is waiting for.
+case "$MODE" in
+    notify) mark_waiting ;;
+    busy | done) clear_waiting ;;
+esac
+
 TTY=$(find_tty) || exit 0
 [ -w "$TTY" ] || exit 0
 
@@ -51,7 +80,6 @@ case "$MODE" in
     busy) emit ']9;4;3' ;;
     done) emit ']9;4;0' ;;
     notify)
-        PAYLOAD=$(cat 2>/dev/null)
         # `message` is what the Notification event carries; the others describe themselves.
         BODY=$(printf '%s' "$PAYLOAD" | jq -r '.message // .reason // empty' 2>/dev/null)
         [ -n "$BODY" ] || BODY="Claude"

@@ -170,12 +170,25 @@ So the reporter lives inside the terminal cmux started, asks the remote host wha
 ```
 cmux terminal
   ├─ cmux-remote-agent-status         asks the far side, reports here
-  │    └─ cmux hooks claude session-start   binds this chat's row to this surface
-  │       cmux hooks claude prompt-submit   the chat is working
-  │       cmux hooks claude stop            the chat is waiting for you
+  │    ├─ cmux hooks claude session-start   binds this chat's row to this surface
+  │    ├─ cmux hooks claude prompt-submit   inside a turn
+  │    ├─ cmux hooks claude stop            waiting for the next prompt
+  │    └─ cmux set-status claude_code …     the text the row shows
   └─ ssh <host>                       the connection whose chat is being reported
        └─ tmux client → chat
 ```
+
+Three states reach the row, and the text is what reads at a glance:
+
+| Row says | The chat is | Read from |
+|---|---|---|
+| `Running` | inside a turn, or running a command | the agent registry's published status |
+| `Needs input` | inside a turn, stopped to ask you something | the file `cmux-report.sh notify` leaves under `~/.cache/agent-tmux/waiting/` |
+| `Idle` | waiting for its next prompt | the published status again |
+
+A pending permission or question is the one state the registry cannot express, because it happens inside a turn and the chat still reads as working. The notification hook is what knows about it, so it writes a file naming the conversation and the next prompt or turn end removes it. That file outranks the published status while it exists.
+
+The text arrives through `set-status`, which draws on any row. cmux's own spinner for a running agent sits behind a feature flag that ships off, so a row shows the text whether or not that flag has been turned on.
 
 **The first report has to be a session-start.** It is what binds the row to the surface, and a later event never moves that binding, so a chat reported without one keeps whichever surface it was first seen in. That surface is gone by the next connection, and a row that no longer exists shows nothing however correct the state is. The reporter therefore sends one whenever the chat it is watching changes, which also re-binds a row left pointing at an earlier connection.
 

@@ -86,7 +86,12 @@ for f in "$HOME"/.claude/sessions/*.json; do
     read -r sid tm published pid dir < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid, (.cwd // "-")] | @tsv' "$f" 2>/dev/null)
     [ "${tm%%:*}" = "$session" ] || continue
     kill -0 "$pid" 2>/dev/null || continue
-    printf '%s\t%s\t%s\n' "$sid" "$published" "$dir"
+    # A pending permission or question lives inside a turn, so the registry still says the chat is
+    # working. The notification hook records it in a file instead, and that outranks the published
+    # status when both describe the same moment.
+    waiting=no
+    [ -f "${XDG_CACHE_HOME:-$HOME/.cache}/agent-tmux/waiting/$sid" ] && waiting=yes
+    printf '%s\t%s\t%s\t%s\n' "$sid" "$published" "$dir" "$waiting"
     exit 0
 done
 REMOTE
@@ -102,17 +107,43 @@ payload() { printf '{"session_id":"%s","cwd":"%s","transcript_path":""}' "$1" "$
 # machine and cmux would otherwise offer to start it here.
 report() { "$CLI" hooks claude "$1" >/dev/null 2>&1 <<<"$(payload "$2" "$3")"; }
 
-# `busy` and `shell` are a turn or a command in flight; anything else is waiting on you.
+# Three states a row can say: a turn in flight, a turn in flight that has stopped to ask you
+# something, and nothing in flight. `busy` and `shell` are a turn or a command running; anything else
+# is the chat waiting for its next prompt.
+phase_for() {
+    local published="$1" waiting="$2"
+    if [ "$waiting" = yes ]; then
+        printf 'asking'
+    else
+        case "$published" in
+            busy | shell) printf 'working' ;;
+            *) printf 'waiting' ;;
+        esac
+    fi
+}
+
+# cmux's own lifecycle for the row. A chat that has stopped to ask is still inside its turn, so it
+# reports as working rather than finished.
 event_for() {
     case "$1" in
-        busy | shell) printf 'prompt-submit' ;;
+        working | asking) printf 'prompt-submit' ;;
         *) printf 'stop' ;;
+    esac
+}
+
+# The text on the row, which is the part that reads at a glance.
+show_phase() {
+    case "$1" in
+        working) "$CLI" set-status claude_code Running --icon bolt --color '#4c8dff' --priority 80 >/dev/null 2>&1 ;;
+        asking) "$CLI" set-status claude_code "Needs input" --icon "questionmark.circle" --color '#ffb02e' --priority 90 >/dev/null 2>&1 ;;
+        *) "$CLI" set-status claude_code Idle --icon moon --color '#8e8e93' --priority 40 >/dev/null 2>&1 ;;
     esac
 }
 
 chat=""
 chat_dir=""
 last=""
+last_phase=""
 
 finish() {
     [ -n "$chat" ] && report session-end "$chat" "$chat_dir"
@@ -126,7 +157,7 @@ misses=0
 while :; do
     if state=$(remote_state "$(local_port)") && [ -n "$state" ]; then
         misses=0
-        IFS=$'\t' read -r sid published dir <<<"$state"
+        IFS=$'\t' read -r sid published dir waiting <<<"$state"
 
         if [ "$sid" != "$chat" ]; then
             # Binds this chat's row to this surface, and re-binds a row still pointing at a surface
@@ -140,18 +171,20 @@ while :; do
             # follows is given its own moment.
             sleep 1
             last=""
+            last_phase=""
         fi
         chat_dir="$dir"
 
-        event=$(event_for "$published")
+        phase=$(phase_for "$published" "${waiting:-no}")
+        # The text and cmux's lifecycle move on their own schedules: a chat that stops to ask you
+        # something changes what the row says while staying inside the same turn.
+        if [ "$phase" != "$last_phase" ]; then
+            show_phase "$phase"
+            last_phase="$phase"
+        fi
+        event=$(event_for "$phase")
         if [ "$event" != "$last" ]; then
             report "$event" "$chat" "$chat_dir"
-            # The hook drives cmux's own lifecycle for the row. A status entry is the documented way to
-            # put text on one, so both are set and the row says what the chat is doing either way.
-            case "$event" in
-                prompt-submit) "$CLI" set-status claude_code Running --icon bolt --color '#4c8dff' --priority 80 >/dev/null 2>&1 ;;
-                *) "$CLI" clear-status claude_code >/dev/null 2>&1 ;;
-            esac
             last="$event"
         fi
     else
@@ -165,6 +198,7 @@ while :; do
             "$CLI" clear-status claude_code >/dev/null 2>&1
             chat=""
             last=""
+            last_phase=""
         fi
     fi
     sleep "$INTERVAL"
