@@ -20,14 +20,53 @@ Run it with no arguments and it prints one flat list: every live agent, every sa
 
 Terminal multiplexers keep a long-running agent alive; nothing keeps track of *which* agent is in *which* session. After a few days you have sessions named for whatever you typed at the time, several of them holding the same conversation, and no way to tell which one is mid-task. This asks the agents themselves and lays the answer out in one table.
 
+## Two implementations
+
+The Rust crate is the one to build on: it reads the same state 17 times faster and exposes it as a library, so another program can call `list()` instead of parsing output. The shell script stays as the reference implementation, useful where a compiler is not welcome.
+
+| | Rust | Shell |
+|---|---|---|
+| Command | `agent-tmux-rs` | `bin/agent-tmux` |
+| A full list of 7 chats | 33–35 ms | 567–591 ms |
+| Embeddable | yes, as `agent_tmux` | no |
+| Needs | `tmux`, Claude Code or Codex | `tmux`, `jq`, `bash` 4+ |
+
+The gap is mostly the read strategy. The title a chat gave itself is the last `ai-title` line in its transcript, and those files reach tens of megabytes: reading the tail costs a few kilobytes where parsing the whole file costs all of it.
+
 ## Install
+
+Rust:
 
 ```bash
 git clone https://github.com/Tristal25/agents-tmux.git ~/agents-tmux
+cd ~/agents-tmux && cargo build --release
+ln -s ~/agents-tmux/target/release/agent-tmux-rs ~/.local/bin/agent-tmux
+```
+
+Shell:
+
+```bash
 ln -s ~/agents-tmux/bin/agent-tmux ~/.local/bin/agent-tmux
 ```
 
-Requires `tmux`, `jq`, `bash` 4 or newer, and Claude Code or Codex. macOS ships bash 3.2, so install a current one (`brew install bash`) and it will be found ahead of the system copy.
+The shell version needs `jq` and `bash` 4 or newer. macOS ships bash 3.2, so install a current one (`brew install bash`) and it will be found ahead of the system copy.
+
+## Embedding it
+
+```rust
+use agent_tmux::{list, open, Scope, State};
+
+for chat in list(&Scope::Everywhere) {
+    println!("{} {:?} {}", chat.title, chat.state, chat.dir.display());
+}
+
+// Opening one replaces the process with tmux, so it returns only on failure.
+if let Some(chat) = list(&Scope::Everywhere).first() {
+    open(&chat.action())?;
+}
+```
+
+`Chat::action()` decides what opening a row means, and the state decides the action: `Running`, `Idle` and `Open` attach to the session holding the chat, `Exited` starts an agent on the conversation, and `No tmux` ends the unreachable agent first. The library shells out to `tmux` for session facts and to nothing else.
 
 ## What each state means
 

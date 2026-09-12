@@ -1,0 +1,19 @@
+[package]
+name = "agent-tmux"
+version = "0.1.0"
+edition = "2021"
+description = "One list for every running and saved coding-agent chat, each in its own tmux session"
+license = "MIT"
+repository = "https://github.com/Tristal25/agents-tmux"
+
+[lib]
+name = "agent_tmux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-tmux-rs"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
