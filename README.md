@@ -159,7 +159,17 @@ A notification is OSC 9, and working state is OSC 9;4, the progress sequence, in
 
 A hook reads its payload from a pipe, so `tty` finds no terminal there; the script takes the controlling terminal by walking up to the agent that spawned it.
 
-**What stays local.** A sidebar's `Running` and `Needs input` badges come from the terminal app reading `~/.claude/sessions/<pid>.json` on its own machine. A remote chat writes that file on the remote host, where those pids and socket paths mean nothing to the laptop, and no escape sequence carries the state. Notifications cross because they are part of the byte stream; the badges are not.
+`contrib/cmux-remote-agent-status` carries the running state, and it runs on the *laptop* rather than beside the chat. cmux accepts agent reports only over a socket connection from a process it started itself, so a report sent from the remote host is refused outright:
+
+```
+ERROR: Access denied - only processes started inside cmux can connect
+```
+
+So the reporter lives inside the terminal cmux started, and asks the remote host what its chat is doing every few seconds, then calls cmux's own hook commands locally. `contrib/example-remote-host-function.fish` shows the shell function that starts it alongside the ssh and ends it with the shell, so nothing has to be configured per session.
+
+Which chat it reports is settled exactly rather than guessed: the surface id travels into the remote shell's environment on the command line, so the remote host names the pty that belongs to that terminal, the tmux client on it, and the conversation that client shows. Matching on connection ports instead attributes the wrong chat as soon as a shell owns more than one ssh, which is why it does not.
+
+**What stays local.** cmux records a lifecycle per surface and draws its badge from that, and a report from outside is refused however it is delivered: the socket checks the connecting process, its Linux CLI carries no hook commands, and a hook run over plain ssh writes the store without the sidebar ever hearing about it. Reporting from inside the terminal, as above, is the only channel that is accepted at all. Whether the badge then renders for a surface whose conversation lives on another machine is cmux's own decision, and one field a remote chat cannot supply is the agent's pid, which cmux knows locally because its wrapper is the agent's parent.
 
 ## How it reads the state
 

@@ -1,0 +1,82 @@
+#!/bin/bash
+# Report a remote chat's state to cmux, from inside the cmux terminal that shows it.
+#
+#   cmux-remote-agent-status <remote-host> [interval-seconds]
+#
+# cmux drives its sidebar from hooks that run beside the agent, and it accepts them only over a
+# socket connection from a process it started itself. A chat on another machine therefore cannot
+# report for itself: whatever it sends arrives from outside and is refused. What it can do is answer
+# questions, so this runs in the surface's own shell, where the socket accepts it, and asks the
+# remote host what its chat is doing.
+#
+# Which chat matters is settled exactly rather than guessed. The surface id travels into the remote
+# shell's environment when the connection opens, so the remote host can name the pty that belongs to
+# this surface, the tmux client on it, and the conversation that client is looking at. Matching on
+# connection ports instead would attribute the wrong chat whenever a shell owns more than one.
+set -u
+
+HOST="${1:-}"
+INTERVAL="${2:-3}"
+[ -n "$HOST" ] || { echo "usage: ${0##*/} <remote-host> [interval-seconds]" >&2; exit 2; }
+
+CLI="${CMUX_BUNDLED_CLI_PATH:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
+[ -x "$CLI" ] || { echo "cmux cli not found at $CLI" >&2; exit 3; }
+[ -n "${CMUX_SURFACE_ID:-}" ] || { echo "run this inside a cmux terminal" >&2; exit 4; }
+
+# What the remote chat on that client is: its conversation id and what it published about itself.
+remote_state() {
+    ssh -o BatchMode=yes -o ConnectTimeout=8 "$HOST" "SURFACE='$CMUX_SURFACE_ID' bash -s" <<'REMOTE'
+set -u
+# The tmux client on the pty belonging to this ssh connection is showing one session, and the agent
+# registry says which conversation that session holds.
+# The pty belonging to this surface, named by the id its shell carries.
+tty=""
+for cand in $(ls /dev/pts 2>/dev/null); do
+    for pid in $(ps -o pid= -t "pts/$cand" 2>/dev/null); do
+        mine=$(cat /proc/$pid/environ 2>/dev/null | tr '\0' '\n' | sed -n 's/^CMUX_SURFACE_ID=//p')
+        [ "$mine" = "$SURFACE" ] && [ -n "$mine" ] && tty="/dev/pts/$cand"
+    done
+    [ -n "$tty" ] && break
+done
+[ -n "$tty" ] || exit 0
+session=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | awk -v t="$tty" '$1 == t {print $2; exit}')
+[ -n "$session" ] || exit 0
+for f in "$HOME"/.claude/sessions/*.json; do
+    [ -f "$f" ] || continue
+    read -r sid tm pub_status pid < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid] | @tsv' "$f" 2>/dev/null)
+    [ "${tm%%:*}" = "$session" ] || continue
+    kill -0 "$pid" 2>/dev/null || continue
+    printf '%s\t%s\n' "$sid" "$pub_status"
+    exit 0
+done
+REMOTE
+}
+
+# `busy` and `shell` are a turn or a command in flight; anything else is waiting on you.
+event_for() {
+    case "$1" in
+        busy | shell) printf 'prompt-submit' ;;
+        *) printf 'stop' ;;
+    esac
+}
+
+last=""
+while :; do
+    if state=$(remote_state) && [ -n "$state" ]; then
+        sid=${state%%$'\t'*}
+        status=${state##*$'\t'}
+        event=$(event_for "$status")
+        if [ "$event" != "$last" ]; then
+            printf '{"session_id":"%s","cwd":"%s"}' "$sid" "$PWD" | "$CLI" hooks claude "$event" >/dev/null 2>&1
+            # The hook drives cmux's own lifecycle. A status entry is the documented way to put text
+            # on a row, so both are set: whichever the sidebar draws for a remote surface, the row
+            # says what the chat is doing.
+            case "$event" in
+                prompt-submit) "$CLI" set-status claude_code Running --icon bolt --color '#4c8dff' --priority 80 >/dev/null 2>&1 ;;
+                *) "$CLI" clear-status claude_code >/dev/null 2>&1 ;;
+            esac
+            last="$event"
+        fi
+    fi
+    sleep "$INTERVAL"
+done
