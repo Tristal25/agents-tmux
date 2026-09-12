@@ -147,15 +147,17 @@ set -g allow-passthrough on
 
 The working directory travels separately: `agent-tmux` emits an OSC 7 for the chat's own directory before handing the screen to tmux, so the sidebar names the folder that chat works in, whichever directory the login shell started from.
 
-For notifications, `contrib/cmux-notify.sh` turns a Claude Code `Notification` event into an OSC 9 written to the pane's tty, wrapped in tmux passthrough. Register it in `~/.claude/settings.json` on the remote host:
+`contrib/cmux-report.sh` carries the rest, as escape sequences on the same stream: a desktop notification, and whether the chat is working. Register it in `~/.claude/settings.json` on the remote host:
 
 ```json
-"Notification": [
-  { "hooks": [ { "type": "command", "command": "~/agents-tmux/contrib/cmux-notify.sh", "timeout": 5 } ] }
-]
+"Notification":     [{ "hooks": [{ "type": "command", "command": "~/agents-tmux/contrib/cmux-report.sh notify" }] }],
+"UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "~/agents-tmux/contrib/cmux-report.sh busy"   }] }],
+"Stop":             [{ "hooks": [{ "type": "command", "command": "~/agents-tmux/contrib/cmux-report.sh done"   }] }]
 ```
 
-A hook reads its payload from a pipe, so `tty` finds no terminal there; the script takes the controlling terminal from `ps` instead.
+A notification is OSC 9, and working state is OSC 9;4, the progress sequence, indeterminate because a turn has no percentage to report. Nothing is configured per session and nothing has to stay alive: the bytes reach whichever terminal is attached when they are written, so a chat reattached to another window reports to that one instead.
+
+A hook reads its payload from a pipe, so `tty` finds no terminal there; the script takes the controlling terminal by walking up to the agent that spawned it.
 
 **What stays local.** A sidebar's `Running` and `Needs input` badges come from the terminal app reading `~/.claude/sessions/<pid>.json` on its own machine. A remote chat writes that file on the remote host, where those pids and socket paths mean nothing to the laptop, and no escape sequence carries the state. Notifications cross because they are part of the byte stream; the badges are not.
 
