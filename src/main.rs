@@ -18,13 +18,15 @@ fn page_size() -> usize {
 fn main() {
     // Piping the list into something that stops reading early, `head` for instance, closes stdout
     // underneath us. That is an ordinary way to use a list, so the write simply ends the program.
-    unsafe { libc_signal_ignore_sigpipe() };
+    unsafe { restore_default_sigpipe() };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut scope = Scope::Everywhere;
     let mut mode = Mode::Pick;
     let mut agent = Agent::Claude;
     let mut new = false;
+    let mut pick_own = false;
+    let mut name: Option<String> = None;
 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -39,6 +41,9 @@ fn main() {
             "-a" | "--all" => scope = Scope::Everywhere,
             "-n" | "--new" => new = true,
             "--codex" => agent = Agent::Codex,
+            "--pick" => pick_own = true,
+            "--share" => std::env::set_var("AGENT_TMUX_SHARE", "1"),
+            "--name" => name = it.next().cloned(),
             "--agent" => match it.next().map(String::as_str) {
                 Some("claude") => agent = Agent::Claude,
                 Some("codex") => agent = Agent::Codex,
@@ -54,11 +59,17 @@ fn main() {
         }
     }
 
-    if new {
-        let action = Action::New {
-            agent,
-            dir: cwd(),
+    if new || pick_own {
+        // `--pick` hands the choosing to the agent's own resume picker, which knows conversations
+        // this tool has no view of, such as one belonging to another machine's directory layout.
+        let action = if pick_own {
+            Action::OwnPicker { agent, dir: cwd() }
+        } else {
+            Action::New { agent, dir: cwd() }
         };
+        if let Some(session) = name {
+            std::env::set_var("AGENT_TMUX_SESSION_NAME", session);
+        }
         if let Err(err) = open(&action) {
             eprintln!("{err}");
             std::process::exit(1);
@@ -80,7 +91,7 @@ enum Mode {
 
 /// Restore the default SIGPIPE behaviour, which Rust disables at startup so that a closed pipe
 /// surfaces as an error instead of ending the process.
-unsafe fn libc_signal_ignore_sigpipe() {
+unsafe fn restore_default_sigpipe() {
     // SIG_DFL for SIGPIPE, declared here rather than pulling in a crate for two constants.
     extern "C" {
         fn signal(sig: i32, handler: usize) -> usize;
@@ -107,7 +118,7 @@ fn short_dir(dir: &Path) -> String {
     let text = dir.to_string_lossy().into_owned();
     // `$HOME` may be a symlink, while a chat records the resolved path.
     let home = home_resolved();
-    let text = if !home.is_empty() && text.starts_with(&home) {
+    let text = if !home.is_empty() && (text == home || text.starts_with(&format!("{home}/"))) {
         format!("~{}", &text[home.len()..])
     } else {
         text
@@ -298,6 +309,18 @@ fn pick(chats: &[Chat]) {
             Ok(n) if n >= 1 && n <= chats.len() => {
                 let chat = &chats[n - 1];
                 if let Action::Takeover { pid, .. } = chat.action() {
+                    // Ending an agent mid-turn drops whatever it is working on, so a working one is
+                    // confirmed rather than assumed.
+                    if chat.state == agent_tmux::State::Running {
+                        println!("That chat is working right now, so ending it drops what it is mid-way through.");
+                        match read_text("enter = end it and reopen under tmux, esc = cancel: ") {
+                            None => {
+                                println!("cancelled");
+                                return;
+                            }
+                            Some(_) => {}
+                        }
+                    }
                     println!("ending pid {pid} so the conversation can reopen under tmux");
                 }
                 act(&chat.action());
@@ -376,7 +399,8 @@ fn read_text(prompt: &str) -> Option<String> {
             _ => {}
         }
     }
-    println!();
+    print!("\r\n");
+    let _ = io::stdout().flush();
     drop(raw);
     Some(typed)
 }
@@ -394,7 +418,14 @@ fn read_choice(prompt: &str) -> Option<String> {
     let mut stdin = io::stdin();
     let mut byte = [0u8; 1];
     loop {
+        // Nothing typed and the stream closed means no answer at all; treating it as the default
+        // would act on a row nobody chose.
         if stdin.read(&mut byte).ok()? == 0 {
+            if typed.is_empty() {
+                println!();
+                drop(raw);
+                return None;
+            }
             break;
         }
         match byte[0] {

@@ -66,7 +66,7 @@ if let Some(chat) = list(&Scope::Everywhere).first() {
 }
 ```
 
-`Chat::action()` decides what opening a row means, and the state decides the action: `Running`, `Idle` and `Open` attach to the session holding the chat, `Exited` starts an agent on the conversation, and `No tmux` ends the unreachable agent first. The library shells out to `tmux` for session facts and to nothing else.
+`Chat::action()` decides what opening a row means: `Running`, `Idle` and `Open` attach to the session holding the chat, `Exited` starts an agent on the conversation, and a live process with no session is taken over, its agent ended before the conversation reopens. `open()` reads the live state again before starting anything, since the list it came from is a snapshot. The library shells out to `tmux` for session facts and to nothing else.
 
 ## It adapts to the machine
 
@@ -175,5 +175,5 @@ A registry entry outlives its process, so every pid is checked before its row is
 
 ## Limits
 
-- Codex publishes no status, so a Codex row reads `Open` when a tmux session holds it and `Exited` otherwise, without splitting working from waiting. A session this tool created names the conversation in its start command; any other session running codex is placed by its working directory, and the newest rollout there is credited with it.
+- Codex publishes no status, so a Codex row reads `Open` when a tmux session holds it and `Exited` otherwise, without splitting working from waiting. A session this tool created names the conversation in its start command, which identifies it exactly; a session running codex without that name is known only by its directory, so every rollout from that directory reads `Open` against it.
 - A `No tmux` chat cannot be moved into tmux while it runs. Relocating a live process onto another terminal is what `reptyr` is for, and it declines this shape: the agent shares a process group with its launcher, and stealing the whole terminal session needs privileges it does not get. So the row ends that agent and reopens the same conversation under tmux instead.

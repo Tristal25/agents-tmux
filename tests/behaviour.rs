@@ -38,7 +38,8 @@ fn a_live_chat_is_joined_rather_than_started_again() {
 
 #[test]
 fn a_saved_conversation_starts_an_agent() {
-    let c = chat(State::Exited, None);
+    let mut c = chat(State::Exited, None);
+    c.pid = None;
     assert_eq!(
         c.action(),
         Action::Resume {
@@ -63,14 +64,39 @@ fn an_agent_outside_tmux_is_ended_before_its_conversation_reopens() {
     );
 }
 
-/// A live row keeps its session even while a stale one names none, so the row can never point at a
-/// session that has gone.
+/// A live process with no session to join can only be taken over. Reaching `Resume` there would put
+/// a second agent on a conversation one already holds, so the mapping refuses it structurally rather
+/// than relying on the state having been computed correctly.
 #[test]
-fn a_live_state_without_a_session_still_starts_an_agent() {
-    assert!(matches!(
-        chat(State::Running, None).action(),
-        Action::Resume { .. }
-    ));
+fn a_live_process_without_a_session_is_never_resumed() {
+    for state in [State::Running, State::Idle, State::Open, State::Exited] {
+        assert!(
+            matches!(chat(state, None).action(), Action::Takeover { .. }),
+            "{state:?} with a live pid and no session must be a takeover"
+        );
+    }
+}
+
+/// A saved conversation has no process behind it, so it starts one.
+#[test]
+fn a_conversation_with_no_process_starts_an_agent() {
+    let mut c = chat(State::Exited, None);
+    c.pid = None;
+    assert!(matches!(c.action(), Action::Resume { .. }));
+}
+
+/// Only agents this machine can start are offered, and an action naming an absent one is refused
+/// rather than creating a session that dies at once.
+#[test]
+fn an_action_reports_which_agent_it_needs() {
+    assert_eq!(
+        chat(State::Running, Some("work")).action().agent(),
+        None,
+        "attaching needs no agent installed"
+    );
+    let mut c = chat(State::Exited, None);
+    c.pid = None;
+    assert_eq!(c.action().agent(), Some(Agent::Claude));
 }
 
 #[test]

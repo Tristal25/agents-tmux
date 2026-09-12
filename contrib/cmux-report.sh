@@ -58,6 +58,9 @@ case "$MODE" in
         # The chat's own directory says which one this is when several are open.
         CWD=$(printf '%s' "$PAYLOAD" | jq -r '.cwd // empty' 2>/dev/null)
         [ -n "$CWD" ] && BODY="$BODY  ($(basename "$CWD"))"
+        # The body is model-authored text, and an escape or BEL inside it would end the sequence
+        # early and leave the rest to be read as the terminal's own control bytes.
+        BODY=$(printf '%s' "$BODY" | tr -d '\000-\037' | cut -c1-200)
         emit "]9;$BODY"
         ;;
     *)

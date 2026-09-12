@@ -71,7 +71,7 @@ pub fn notify(body: &str) -> std::io::Result<()> {
     let Some(tty) = owning_tty() else {
         return Ok(());
     };
-    let payload = if std::env::var_os("TMUX").is_some() {
+    let payload = if crate::in_tmux() {
         format!("\x1bPtmux;\x1b\x1b]9;{body}\x07\x1b\\")
     } else {
         format!("\x1b]9;{body}\x07")

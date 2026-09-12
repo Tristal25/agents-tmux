@@ -5,7 +5,7 @@ use crate::tmux;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,7 +44,9 @@ struct Live {
     dir: PathBuf,
     pid: i32,
     session: Option<String>,
-    working: bool,
+    /// What the agent said about itself, and `None` when it published nothing: an older agent has
+    /// no status to read, and only then does the write clock decide the state.
+    working: Option<bool>,
     stamp: i64,
 }
 
@@ -83,17 +85,32 @@ fn live_agents() -> Vec<Live> {
             // anything can be attached to.
             session: reg
                 .tmux
-                .filter(|t| t != "-")
+                .filter(|t| t != "-" && !t.is_empty())
                 .map(|t| t.split(':').next().unwrap_or(&t).to_string()),
             working: reg
                 .status
                 .as_deref()
-                .map(|s| WORKING.contains(&s))
-                .unwrap_or(false),
+                .filter(|s| *s != "-")
+                .map(|s| WORKING.contains(&s)),
             stamp: reg.status_updated_at.unwrap_or(0) / 1000,
         });
     }
     out
+}
+
+/// The tmux session holding a conversation right now, newest activity first.
+///
+/// Read at the moment a row is acted on, because the drawn list is a snapshot: a conversation with
+/// nothing holding it a second ago can be live now, and starting a second agent on it would put two
+/// of them on one transcript.
+pub fn live_session_for(id: &str) -> Option<String> {
+    let sessions = crate::tmux::sessions();
+    live_agents()
+        .into_iter()
+        .filter(|live| live.id == id)
+        .filter_map(|live| live.session)
+        .filter(|name| sessions.contains_key(name))
+        .max_by_key(|name| sessions.get(name).map(|s| s.activity).unwrap_or(0))
 }
 
 fn mtime(path: &Path) -> i64 {
@@ -190,16 +207,24 @@ fn user_text(value: &serde_json::Value) -> Option<String> {
 /// The directory a conversation belongs to, read from the transcript itself: the project directory
 /// name turns every slash into a dash, and a real dash in a path makes that ambiguous.
 fn dir_of(transcript: &Path) -> PathBuf {
-    if let Ok(text) = fs::read_to_string(transcript) {
-        for line in text.lines().take(200) {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+    // Only the opening entries are read: these files reach tens of megabytes and the directory is
+    // recorded from the first one.
+    if let Ok(file) = File::open(transcript) {
+        for line in std::io::BufReader::new(file).lines().take(200).map_while(Result::ok) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(cwd) = value.get("cwd").and_then(|c| c.as_str()) {
                     return PathBuf::from(cwd);
                 }
             }
         }
     }
-    PathBuf::new()
+    // Without one, the project directory's name decodes back to a path. Every `/` became a `-`, so
+    // a real dash is indistinguishable, which is why the transcript is asked first.
+    transcript
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|key| PathBuf::from(key.to_string_lossy().replace('-', "/")))
+        .unwrap_or_default()
 }
 
 /// Every Claude chat, live or saved. One row per conversation: several tmux sessions can hold the
@@ -211,6 +236,7 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
         .unwrap_or(0);
 
     let mut by_id: HashMap<String, Chat> = HashMap::new();
+    let mut published_idle = false;
     for live in live_agents() {
         if let Scope::Dir(want) = scope {
             if &live.dir != want {
@@ -233,8 +259,10 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
         entry.held += 1;
         // Any agent on this conversation reporting work counts as work, so a busy one is never
         // masked by an idle sibling.
-        if live.working {
-            entry.state = State::Running;
+        match live.working {
+            Some(true) => entry.state = State::Running,
+            Some(false) => published_idle = true,
+            None => {}
         }
         entry.last_used = entry.last_used.max(live.stamp);
 
@@ -252,7 +280,12 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
             .and_then(|s| sessions.get(s))
             .map(|s| s.activity)
             .unwrap_or(-1);
-        if live.session.is_some() && activity >= better {
+        let session_exists = live
+            .session
+            .as_ref()
+            .map(|name| sessions.contains_key(name))
+            .unwrap_or(false);
+        if session_exists && activity >= better {
             entry.session = live.session.clone();
             entry.pid = Some(live.pid);
             entry.attached = sessions
@@ -263,7 +296,9 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
 
         let worked = work_epoch(&transcript);
         entry.last_used = entry.last_used.max(worked);
-        if entry.state != State::Running && now - worked <= crate::IDLE_AFTER {
+        // The write clock only decides for an agent that published nothing; overriding a published
+        // `idle` would call a chat working because a file was touched.
+        if entry.state != State::Running && !published_idle && now - worked <= crate::IDLE_AFTER {
             entry.state = State::Running;
         }
     }

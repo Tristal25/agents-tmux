@@ -117,16 +117,28 @@ pub enum Action {
     },
     /// Start an agent with nothing loaded.
     New { agent: Agent, dir: PathBuf },
+    /// Start the agent on its own resume picker, which lists conversations this tool cannot see.
+    OwnPicker { agent: Agent, dir: PathBuf },
 }
 
 impl Action {
+    /// The conversation this action would start an agent on, if any. Attaching names no
+    /// conversation, since the agent holding it is already running.
+    pub fn conversation(&self) -> Option<&str> {
+        match self {
+            Action::Resume { id, .. } | Action::Takeover { id, .. } => Some(id),
+            Action::Attach { .. } | Action::New { .. } | Action::OwnPicker { .. } => None,
+        }
+    }
+
     /// The agent this action needs installed, if it starts one at all.
     pub fn agent(&self) -> Option<Agent> {
         match self {
             Action::Attach { .. } => None,
-            Action::Resume { agent, .. } | Action::Takeover { agent, .. } | Action::New { agent, .. } => {
-                Some(*agent)
-            }
+            Action::Resume { agent, .. }
+            | Action::Takeover { agent, .. }
+            | Action::New { agent, .. }
+            | Action::OwnPicker { agent, .. } => Some(*agent),
         }
     }
 }
@@ -136,6 +148,14 @@ impl Chat {
         match (self.state, &self.session) {
             (s, Some(session)) if s.is_live_in_tmux() => Action::Attach {
                 session: session.clone(),
+            },
+            // A live process with no session to join is taken over whatever the row says, so a
+            // state that outran its session can never start a second agent on the conversation.
+            _ if self.pid.is_some() && self.session.is_none() => Action::Takeover {
+                pid: self.pid.unwrap_or(0),
+                agent: self.agent,
+                id: self.id.clone(),
+                dir: self.dir.clone(),
             },
             (State::NoTmux, _) => Action::Takeover {
                 pid: self.pid.unwrap_or(0),

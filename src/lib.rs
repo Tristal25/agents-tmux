@@ -13,7 +13,7 @@ pub mod tmux;
 pub use model::{Action, Agent, Chat, Scope, State};
 
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Whether this process runs inside tmux. An empty value counts as outside, since a shell that
@@ -52,6 +52,20 @@ pub fn open(action: &Action) -> std::io::Result<()> {
             ));
         }
     }
+    // The list is a snapshot. A conversation with nothing holding it when the rows were drawn can
+    // be live by the time one is chosen, and starting a second agent on it puts two of them on one
+    // transcript, so the live state is read again here rather than trusted.
+    if let Some(id) = action.conversation() {
+        if !safe_id(id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("conversation id holds characters it should not: {id}"),
+            ));
+        }
+        if let Some(session) = claude::live_session_for(id) {
+            return attach(&session);
+        }
+    }
     match action {
         Action::Attach { session } => attach(session),
         Action::Resume { agent, id, dir } => {
@@ -59,8 +73,16 @@ pub fn open(action: &Action) -> std::io::Result<()> {
             spawn(&name, resume_command(*agent, id), dir)
         }
         Action::New { agent, dir } => {
-            let name = tmux::free_name(agent.as_str(), dir);
+            let name = session_name(*agent, dir);
             spawn(&name, agent.as_str().to_string(), dir)
+        }
+        Action::OwnPicker { agent, dir } => {
+            let name = session_name(*agent, dir);
+            let cmd = match agent {
+                Agent::Claude => "claude --resume".to_string(),
+                Agent::Codex => "codex resume".to_string(),
+            };
+            spawn(&name, cmd, dir)
         }
         Action::Takeover {
             pid,
@@ -78,8 +100,23 @@ pub fn open(action: &Action) -> std::io::Result<()> {
     }
 }
 
+/// A name given on the command line wins over the derived one, since tmux takes any name and the
+/// caller may want a memorable one.
+fn session_name(agent: Agent, dir: &Path) -> String {
+    std::env::var("AGENT_TMUX_SESSION_NAME")
+        .ok()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| tmux::free_name(agent.as_str(), dir))
+}
+
 /// A failed resume ends the session rather than falling back to an empty chat, which would leave a
 /// session holding a conversation nobody asked for under a name that says otherwise.
+/// A conversation id reaches this from a file name, and it is placed inside a single-quoted shell
+/// string, so anything outside the alphabet ids use is refused rather than escaped.
+fn safe_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 fn resume_command(agent: Agent, id: &str) -> String {
     let fallback =
         r#"{ printf "\ncould not open that conversation\n"; read -rsn1 -p "press any key"; }"#;
@@ -135,12 +172,13 @@ fn spawn(session: &str, command: String, dir: &Path) -> std::io::Result<()> {
 
 /// Ask an agent to finish, and insist if it does not.
 fn end_agent(pid: i32) {
-    let group = ps_field(pid, "pgid");
-    let session = ps_field(pid, "sid");
-    // Closing a terminal ends the whole foreground group, which the agent already handles cleanly.
-    // The guard keeps a login shell out of it when the agent leads its own session.
-    match group {
-        Some(g) if Some(g) != session => signal(&format!("-{g}"), "TERM"),
+    // Closing a terminal ends the whole foreground group, which the agent handles cleanly, so the
+    // group is the right target when the agent leads it. A group it merely belongs to can be the
+    // login shell's, taking the shell and every sibling job with it, and an unreadable `ps` looks
+    // the same as a group it leads. So the group is signalled only on positive proof of leadership,
+    // and anything else narrows to the one process.
+    match ps_field(pid, "pgid") {
+        Some(g) if g == pid => signal(&format!("-{g}"), "TERM"),
         _ => signal(&pid.to_string(), "TERM"),
     }
     for _ in 0..10 {
@@ -160,8 +198,13 @@ fn signal(target: &str, sig: &str) {
 
 /// `/proc` answers on Linux; elsewhere the signal that asks without sending anything does.
 fn alive(pid: i32) -> bool {
-    if PathBuf::from(format!("/proc/{pid}")).exists() {
-        return true;
+    // A zombie satisfies both probes below, so an unreaped agent would cost the whole wait.
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return !stat
+            .rsplit(')')
+            .next()
+            .map(|rest| rest.trim_start().starts_with('Z'))
+            .unwrap_or(false);
     }
     Command::new("kill")
         .args(["-0", &pid.to_string()])
