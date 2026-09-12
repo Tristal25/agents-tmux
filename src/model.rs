@@ -15,6 +15,28 @@ impl Agent {
             Agent::Codex => "codex",
         }
     }
+
+    pub const ALL: [Agent; 2] = [Agent::Claude, Agent::Codex];
+
+    /// Whether this agent can be started here. One machine has Claude Code, another has Codex, and
+    /// a third has both, so what to offer is decided by looking rather than by asking at install
+    /// time: installing the other one later needs no further setup.
+    pub fn available(self) -> bool {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+        std::env::split_paths(&path).any(|dir| {
+            let candidate = dir.join(self.as_str());
+            candidate.is_file() && is_executable(&candidate)
+        })
+    }
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// What choosing a row does follows from its state, so the two are defined together.
@@ -95,6 +117,18 @@ pub enum Action {
     },
     /// Start an agent with nothing loaded.
     New { agent: Agent, dir: PathBuf },
+}
+
+impl Action {
+    /// The agent this action needs installed, if it starts one at all.
+    pub fn agent(&self) -> Option<Agent> {
+        match self {
+            Action::Attach { .. } => None,
+            Action::Resume { agent, .. } | Action::Takeover { agent, .. } | Action::New { agent, .. } => {
+                Some(*agent)
+            }
+        }
+    }
 }
 
 impl Chat {

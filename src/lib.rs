@@ -42,6 +42,16 @@ pub fn list(scope: &Scope) -> Vec<Chat> {
 /// transcript: a live row joins its session, and only a conversation with nothing holding it starts
 /// a process. Handing over to tmux replaces this process, so a success never returns.
 pub fn open(action: &Action) -> std::io::Result<()> {
+    // Starting an agent that is not installed would create a session that dies at once, so the
+    // reason is reported instead. Attaching needs nothing but tmux.
+    if let Some(agent) = action.agent() {
+        if !agent.available() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{} is not installed on this machine", agent.as_str()),
+            ));
+        }
+    }
     match action {
         Action::Attach { session } => attach(session),
         Action::Resume { agent, id, dir } => {
@@ -148,8 +158,16 @@ fn signal(target: &str, sig: &str) {
         .status();
 }
 
+/// `/proc` answers on Linux; elsewhere the signal that asks without sending anything does.
 fn alive(pid: i32) -> bool {
-    PathBuf::from(format!("/proc/{pid}")).exists()
+    if PathBuf::from(format!("/proc/{pid}")).exists() {
+        return true;
+    }
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn ps_field(pid: i32, field: &str) -> Option<i32> {

@@ -165,13 +165,31 @@ fn row(number: &str, chat: &Chat) -> String {
     )
 }
 
-fn new_rows() -> String {
+/// The letter offered for each agent, fixed so the key does not move when the other agent appears.
+fn letter(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "a",
+        Agent::Codex => "b",
+    }
+}
+
+/// Only agents this machine can start are offered, since a row for a missing one leads to a session
+/// that dies at once.
+fn offered() -> Vec<Agent> {
+    Agent::ALL.into_iter().filter(|a| a.available()).collect()
+}
+
+fn new_rows(agents: &[Agent]) -> String {
     let dir = short_dir(&cwd());
-    format!(
-        " {:<2} {:<8} {:<11} {:<11} {:<31} {}\n {:<2} {:<8} {:<11} {:<11} {:<31} {}\n",
-        "a", "claude", "New", "-", dir, "empty conversation",
-        "b", "codex", "New", "-", dir, "empty conversation"
-    )
+    agents
+        .iter()
+        .map(|a| {
+            format!(
+                " {:<2} {:<8} {:<11} {:<11} {:<31} {}\n",
+                letter(*a), a.as_str(), "New", "-", dir, "empty conversation"
+            )
+        })
+        .collect()
 }
 
 fn print_all(chats: &[Chat], scope: &Scope) {
@@ -179,7 +197,7 @@ fn print_all(chats: &[Chat], scope: &Scope) {
     for (i, chat) in chats.iter().enumerate() {
         print!("{}", row(&(i + 1).to_string(), chat));
     }
-    print!("{}", new_rows());
+    print!("{}", new_rows(&offered()));
     println!("\n*  another terminal is looking at this chat right now");
     match scope {
         Scope::Everywhere => println!(
@@ -192,6 +210,11 @@ fn print_all(chats: &[Chat], scope: &Scope) {
 
 fn pick(chats: &[Chat]) {
     let size = page_size();
+    let agents = offered();
+    if chats.is_empty() && agents.is_empty() {
+        println!("No chats, and neither claude nor codex is on PATH.");
+        return;
+    }
     let mut start = 0usize;
     loop {
         print!("{}", header());
@@ -199,7 +222,7 @@ fn pick(chats: &[Chat]) {
         for i in start..last {
             print!("{}", row(&(i + 1).to_string(), &chats[i]));
         }
-        print!("{}", new_rows());
+        print!("{}", new_rows(&agents));
         if chats.len() > size {
             println!(
                 "\nchats {}-{} of {}, page {}/{}",
@@ -212,8 +235,16 @@ fn pick(chats: &[Chat]) {
         }
         println!("\n*  another terminal is looking at this chat right now");
 
-        let default = if chats.is_empty() { "a".to_string() } else { (start + 1).to_string() };
-        let mut prompt = format!("Choice [{default}], a new claude chat, b new codex chat");
+        let default = if chats.is_empty() {
+            agents.first().map(|a| letter(*a).to_string()).unwrap_or_default()
+        } else {
+            (start + 1).to_string()
+        };
+        let offers: Vec<String> = agents
+            .iter()
+            .map(|a| format!("{} new {} chat", letter(*a), a.as_str()))
+            .collect();
+        let mut prompt = format!("Choice [{default}], {}", offers.join(", "));
         if chats.len() > size {
             prompt.push_str(", n/p page");
         }
@@ -245,7 +276,12 @@ fn pick(chats: &[Chat]) {
                 continue;
             }
             "a" | "A" | "b" | "B" => {
-                let agent = if reply.eq_ignore_ascii_case("a") { Agent::Claude } else { Agent::Codex };
+                let wanted = if reply.eq_ignore_ascii_case("a") { Agent::Claude } else { Agent::Codex };
+                if !agents.contains(&wanted) {
+                    println!("{} is not installed on this machine\n", wanted.as_str());
+                    continue;
+                }
+                let agent = wanted;
                 // The directory is the one thing worth asking about, since a new chat has no
                 // history to take it from.
                 let Some(dir) = ask_dir() else {
@@ -401,10 +437,38 @@ fn read_choice(prompt: &str) -> Option<String> {
 /// Distinguishing a lone escape from an arrow key needs a short wait, and `stty` already owns the
 /// terminal settings here, so the timeout comes from the same place rather than from a dependency.
 fn read_with_timeout(stdin: &mut io::Stdin, buf: &mut [u8]) -> usize {
-    let _ = Command::new("stty").args(["-F", "/dev/tty", "time", "1", "min", "0"]).status();
+    stty(&["time", "1", "min", "0"]);
     let read = stdin.read(buf).unwrap_or(0);
-    let _ = Command::new("stty").args(["-F", "/dev/tty", "time", "0", "min", "1"]).status();
+    stty(&["time", "0", "min", "1"]);
     read
+}
+
+/// Which flag this `stty` takes for the terminal to act on: GNU spells it `-F`, BSD `-f`, and macOS
+/// ships the BSD one. Asked once, since every later call needs the same answer.
+fn stty_flag() -> &'static str {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<&'static str> = OnceLock::new();
+    FLAG.get_or_init(|| {
+        let works = Command::new("stty")
+            .args(["-F", "/dev/tty", "-g"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if works {
+            "-F"
+        } else {
+            "-f"
+        }
+    })
+}
+
+fn stty(args: &[&str]) -> Option<String> {
+    let mut all = vec![stty_flag(), "/dev/tty"];
+    all.extend_from_slice(args);
+    let out = Command::new("stty").args(&all).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Raw mode, so a single keypress acts without waiting for Enter. `stty` keeps this dependency-free
@@ -415,26 +479,18 @@ struct RawMode {
 
 impl RawMode {
     fn enable() -> Self {
-        let saved = Command::new("stty")
-            .args(["-F", "/dev/tty", "-g"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
-        let _ = Command::new("stty")
-            .args(["-F", "/dev/tty", "raw", "-echo", "min", "1", "time", "0"])
-            .status();
+        let saved = stty(&["-g"]).filter(|s| !s.is_empty());
+        stty(&["raw", "-echo", "min", "1", "time", "0"]);
         RawMode { saved }
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        if let Some(saved) = &self.saved {
-            let _ = Command::new("stty").args(["-F", "/dev/tty", saved]).status();
-        } else {
-            let _ = Command::new("stty").args(["-F", "/dev/tty", "sane"]).status();
-        }
+        match &self.saved {
+            Some(saved) => stty(&[saved]),
+            None => stty(&["sane"]),
+        };
     }
 }
 

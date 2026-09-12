@@ -46,6 +46,19 @@ live_agents() {
     done
 }
 
+# GNU and BSD disagree here twice over: `date -r` takes a file on one and an epoch on the other, and
+# the flag for a modification time differs between their `stat`. So the time comes from whichever
+# `stat` answers, which keeps one script working on Linux and macOS alike.
+mtime() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
+}
+
+# Whether an agent can be started here. One machine has Claude Code, another has Codex, so what the
+# list offers is decided by looking rather than by asking during setup.
+agent_available() {
+    command -v "$1" >/dev/null 2>&1
+}
+
 # A working agent appends to its transcript continuously, so a transcript untouched for longer than
 # this is an agent waiting on you rather than one doing something.
 IDLE_AFTER=30
@@ -56,10 +69,10 @@ IDLE_AFTER=30
 # write under <id>/subagents/, so the newest write across both places is the honest clock.
 work_epoch() {
     local transcript="$1" newest=0 f
-    [ -f "$transcript" ] && newest=$(date -r "$transcript" +%s)
+    [ -f "$transcript" ] && newest=$(mtime "$transcript")
     for f in "${transcript%.jsonl}"/subagents/*.jsonl; do
         [ -f "$f" ] || continue
-        f=$(date -r "$f" +%s)
+        f=$(mtime "$f")
         [ "$f" -gt "$newest" ] && newest="$f"
     done
     printf '%s' "$newest"
@@ -185,7 +198,7 @@ collect_rows() {
             [ -f "$f" ] || continue
             id=$(basename "$f" .jsonl)
             [ -z "${running[$id]:-}" ] || continue
-            epoch=$(date -r "$f" +%s)
+            epoch=$(mtime "$f")
             printf '%s\tclaude\t%s\tExited\t-\t0\t1\t-\t%s\t%s\n' \
                 "$epoch" "$id" "$(cwd_of_transcript "$f")" \
                 "$(printf '%s' "$(title_of "$f")" | cut -c1-52)"
@@ -210,7 +223,7 @@ collect_rows() {
         [ -n "$cwd" ] || cwd="$HOME"
         tmux_name="${codex_by_id[$id]:-${codex_by_dir[$cwd]:-}}"
         if [ -n "$tmux_name" ]; then state=Open; else state=Exited; tmux_name="-"; fi
-        printf '%s\tcodex\t%s\t%s\t%s\t%s\t1\t-\t%s\t%s\n' "$(date -r "$f" +%s)" "$id" "$state" \
+        printf '%s\tcodex\t%s\t%s\t%s\t%s\t1\t-\t%s\t%s\n' "$(mtime "$f")" "$id" "$state" \
             "$tmux_name" "${att[$tmux_name]:-0}" "$cwd" "$(basename "$(dirname "$f")")"
     done < <(find "$CODEX_HOME" -maxdepth 4 \( -name "rollout-*.jsonl" -o -path "*/sessions/*.jsonl" \) 2>/dev/null)
 }
@@ -336,6 +349,7 @@ load_rows() {
     # keeps the numbers for conversations that already exist.
     local agent letter
     for agent in claude codex; do
+        agent_available "$agent" || continue
         [ "$agent" = claude ] && letter=a || letter=b
         ACTIONS+=("$(printf 'new\t%s\t%s' "$agent" "$(pwd -P)")")
         LINES+=("$(printf '%2s  %-8s %-11s %-11s %-31s %s' \

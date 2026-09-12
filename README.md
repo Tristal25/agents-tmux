@@ -68,6 +68,28 @@ if let Some(chat) = list(&Scope::Everywhere).first() {
 
 `Chat::action()` decides what opening a row means, and the state decides the action: `Running`, `Idle` and `Open` attach to the session holding the chat, `Exited` starts an agent on the conversation, and `No tmux` ends the unreachable agent first. The library shells out to `tmux` for session facts and to nothing else.
 
+## It adapts to the machine
+
+Nothing is configured at install time. Both implementations look at what is present and offer only that:
+
+| On the machine | The list offers |
+|---|---|
+| Claude Code and Codex | `a` and `b` |
+| Claude Code only | `a` |
+| Codex only | `b` |
+| neither | the saved conversations, and says why nothing can be started |
+
+The letters are fixed to their agent, so `b` stays `b` when Claude is missing and nothing moves under your fingers once the other agent appears. Asking for an absent one by flag reports it rather than creating a session that dies at once:
+
+```
+$ agent-tmux --new --agent codex
+codex is not installed on this machine
+```
+
+A missing `~/.claude` or `~/.codex` is simply an empty contribution to the list, so a machine with one agent behaves as if the other never existed.
+
+Both run on Linux and macOS. Three places where the two systems disagree are handled rather than assumed: `date -r` means a file on GNU and an epoch on BSD, so file times come from whichever `stat` answers; `stty` takes `-F` on GNU and `-f` on BSD, asked once at startup; and a process is checked through `/proc` where it exists and with a signal that sends nothing where it does not.
+
 ## What each state means
 
 | State | Meaning | Picking it |
