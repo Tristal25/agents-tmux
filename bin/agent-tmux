@@ -349,6 +349,7 @@ auto_name() {
 # inside a tmux, with two status bars and a doubled prefix key.
 attach_session() {
     local target="$1"
+    announce_dir "$(tmux display -pt "=$target" '#{pane_current_path}' 2>/dev/null || pwd -P)"
     if [ -n "${TMUX:-}" ]; then
         exec tmux switch-client -t "=$target"
     fi
@@ -373,6 +374,14 @@ live_session_for() {
         if [ "${act:-0}" -ge "$best_at" ]; then best_at="${act:-0}"; best="$tm"; fi
     done < <(live_agents)
     printf '%s' "$best"
+}
+
+# A terminal learns its working directory from OSC 7, and tmux consumes that sequence to fill its
+# own per-pane path rather than passing it outward, so a terminal on the far side of an ssh
+# connection keeps showing the directory the login shell started in. Announcing the chat's
+# directory here, before tmux takes the screen, is what makes that terminal name the right folder.
+announce_dir() {
+    printf '\033]7;file://%s%s\033\\' "$(hostname -f 2>/dev/null || hostname)" "$1"
 }
 
 # The session is created in the conversation's own directory, so choosing a row from anywhere
@@ -408,6 +417,7 @@ start_session() {
         tmux new-session -d -s "$session" -c "$dir" "$cmd" && exec tmux switch-client -t "=$session"
         return 1
     fi
+    announce_dir "$dir"
     exec tmux new -s "$session" -c "$dir" "$cmd"
 }
 

@@ -66,6 +66,36 @@ agent-tmux <name> <id>          create it resuming that conversation id
 
 Flags work in any position: `-n/--new`, `--here`, `--agent claude|codex`, `--pick` (hand off to the agent's own picker), `--name <name>`, `--share`. `Esc` cancels any prompt.
 
+## Running chats on a remote host, seen from cmux
+
+Working from a laptop against a bigger machine leaves the chats on the far side of an ssh connection, where a terminal with a sidebar (cmux, and anything else that reads the terminal stream) labels the row with the ssh command it launched and leaves the chat behind it invisible. tmux is the reason: it consumes the inner pane's title and working directory to fill its own per-pane state, so both stop there.
+
+Three settings and one hook close most of that gap. In `~/.tmux.conf` on the remote host:
+
+```tmux
+# Claude Code publishes the chat title as the pane title; forwarding it names the tab after the chat.
+set -g set-titles on
+set -g set-titles-string "#{pane_title}"
+
+# An escape sequence a program sends for the owning terminal, such as a desktop notification,
+# only gets there when tmux passes it through.
+set -g allow-passthrough on
+```
+
+The working directory travels separately: `agent-tmux` emits an OSC 7 for the chat's own directory before handing the screen to tmux, so the sidebar names the folder that chat works in, whichever directory the login shell started from.
+
+For notifications, `contrib/cmux-notify.sh` turns a Claude Code `Notification` event into an OSC 9 written to the pane's tty, wrapped in tmux passthrough. Register it in `~/.claude/settings.json` on the remote host:
+
+```json
+"Notification": [
+  { "hooks": [ { "type": "command", "command": "~/agents-tmux/contrib/cmux-notify.sh", "timeout": 5 } ] }
+]
+```
+
+A hook reads its payload from a pipe, so `tty` finds no terminal there; the script takes the controlling terminal from `ps` instead.
+
+**What stays local.** A sidebar's `Running` and `Needs input` badges come from the terminal app reading `~/.claude/sessions/<pid>.json` on its own machine. A remote chat writes that file on the remote host, where those pids and socket paths mean nothing to the laptop, and no escape sequence carries the state. Notifications cross because they are part of the byte stream; the badges are not.
+
 ## How it reads the state
 
 | Source | Used for |
