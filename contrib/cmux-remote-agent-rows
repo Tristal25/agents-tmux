@@ -122,6 +122,11 @@ set_row() {
 
 clear_row() { "$CLI" clear-status remote_chat --workspace "$1" >/dev/null 2>&1; }
 
+# cmux writes its own agent line, under its own key, for a surface that has one of its agent sessions
+# bound. That line says the same thing in the same place, so a second one from here would only repeat
+# it: this stays quiet while it is up, and speaks for the row again once it goes.
+row_speaks_for_itself() { "$CLI" list-status --workspace "$1" 2>/dev/null | grep -q '^claude_code='; }
+
 # What each row was last told, as `workspace=phase;` pairs, so an unchanged row is left alone.
 shown=""
 
@@ -143,6 +148,12 @@ while :; do
             [ -n "${port:-}" ] || continue
             ws=$(workspace_for_port "$port") || continue
             [ -n "$ws" ] || continue
+            if row_speaks_for_itself "$ws"; then
+                # Clearing without checking covers a line left behind by an earlier run of this, which
+                # would otherwise sit under cmux's own line saying the same thing.
+                clear_row "$ws"
+                continue
+            fi
             phase=$(phase_for "$published" "${waiting:-no}")
             case "$shown" in
                 *"$ws=$phase;"*) ;;

@@ -131,23 +131,17 @@ event_for() {
     esac
 }
 
-# The text on the row, which is the part that reads at a glance.
-show_phase() {
-    case "$1" in
-        working) "$CLI" set-status remote_chat Running --icon bolt --color '#4c8dff' --priority 80 >/dev/null 2>&1 ;;
-        asking) "$CLI" set-status remote_chat "Needs input" --icon "questionmark.circle" --color '#ffb02e' --priority 90 >/dev/null 2>&1 ;;
-        *) "$CLI" set-status remote_chat Idle --icon moon --color '#8e8e93' --priority 40 >/dev/null 2>&1 ;;
-    esac
-}
+# Nothing here writes the row's text. A lifecycle cmux accepts makes cmux draw its own agent line and
+# its spinner for that surface, which is the same thing a chat started on this machine gets, so a line
+# written from here would sit next to an identical one. `cmux-remote-agent-rows` covers the rows that
+# have no lifecycle of their own.
 
 chat=""
 chat_dir=""
 last=""
-last_phase=""
 
 finish() {
     [ -n "$chat" ] && report session-end "$chat" "$chat_dir"
-    "$CLI" clear-status remote_chat >/dev/null 2>&1
     ssh -o ControlPath="$CONTROL" -O exit "$HOST" 2>/dev/null
     exit 0
 }
@@ -171,17 +165,10 @@ while :; do
             # follows is given its own moment.
             sleep 1
             last=""
-            last_phase=""
         fi
         chat_dir="$dir"
 
         phase=$(phase_for "$published" "${waiting:-no}")
-        # The text and cmux's lifecycle move on their own schedules: a chat that stops to ask you
-        # something changes what the row says while staying inside the same turn.
-        if [ "$phase" != "$last_phase" ]; then
-            show_phase "$phase"
-            last_phase="$phase"
-        fi
         event=$(event_for "$phase")
         if [ "$event" != "$last" ]; then
             report "$event" "$chat" "$chat_dir"
@@ -195,10 +182,8 @@ while :; do
         misses=$((misses + 1))
         if [ -n "$chat" ] && [ "$misses" -ge 2 ]; then
             report session-end "$chat" "$chat_dir"
-            "$CLI" clear-status remote_chat >/dev/null 2>&1
             chat=""
             last=""
-            last_phase=""
         fi
     fi
     sleep "$INTERVAL"
