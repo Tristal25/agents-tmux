@@ -190,6 +190,24 @@ A pending permission or question is the one state the registry cannot express, b
 
 The text arrives through `set-status`, which draws on any row. cmux's own spinner for a running agent sits behind a feature flag that ships off, so a row shows the text whether or not that flag has been turned on.
 
+**Pick a status key of your own.** `claude_code` belongs to cmux's agent hooks: it holds a value only while one of cmux's own agent sessions is bound to that surface, and the entry is dropped the moment none is. A key like `remote_chat` is yours and keeps whatever you set, which is why both scripts here use one.
+
+### One process for every terminal
+
+`contrib/cmux-remote-agent-rows` is the same idea without the per-terminal part. Row text takes a `--workspace`, so a single process can speak for every terminal open to that host, including terminals that were already open when it started:
+
+```
+tmux client on the far side ─ port ─ ssh here ─ surface ─ workspace ─ row
+```
+
+Each poll asks the host which chats its attached clients are looking at and which connection each one arrived on. The port names the ssh on this side, and the surface holding that ssh names the row to write. Run it once, from anywhere on the machine running cmux: it borrows a socket token from a terminal cmux is running, which frees it from living in one. A launch agent keeps it up:
+
+```bash
+launchctl load -w ~/Library/LaunchAgents/<your-label>.plist   # macOS notes it as a new login item
+```
+
+What it gives up is cmux's own agent lifecycle, which is accepted only from inside the surface. Use `cmux-remote-agent-status` per terminal when you want that as well; use this one when you want every row to say what its chat is doing with nothing to arrange.
+
 **The first report has to be a session-start.** It is what binds the row to the surface, and a later event never moves that binding, so a chat reported without one keeps whichever surface it was first seen in. That surface is gone by the next connection, and a row that no longer exists shows nothing however correct the state is. The reporter therefore sends one whenever the chat it is watching changes, which also re-binds a row left pointing at an earlier connection.
 
 **The connection settles which chat is being shown.** A chat opened in tmux keeps the environment tmux itself started with, so a marker placed in the login shell stops at the login shell, and a chat opened yesterday carries yesterday's surface id. The ssh connection is visible from both ends for as long as it lasts: the reporter reads the local port of the ssh beside it, and the remote host finds the pty holding that connection, the tmux client on that pty, and the conversation that client is looking at.

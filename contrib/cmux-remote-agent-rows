@@ -1,0 +1,166 @@
+#!/bin/bash
+# Give every remote chat's cmux row its state, from one process on this machine.
+#
+#   cmux-remote-agent-rows <remote-host> [interval-seconds]
+#
+# The companion `cmux-remote-agent-status` reports for the one terminal it lives in, because cmux takes
+# its own agent lifecycle only from a process it can trace into that terminal. Row text has no such
+# rule: `set-status` names the workspace it applies to, so a single process can speak for every terminal
+# open to that host, including the ones that were already open before it started.
+#
+# Each poll asks the host which chats its attached clients are looking at, and gets back the connection
+# each one arrived on. A connection is visible from both ends, so the port names the ssh on this side,
+# and the surface holding that ssh names the row to write.
+#
+#   tmux client on the far side ─ port ─ ssh here ─ surface ─ workspace ─ row
+#
+# Nothing needs to be installed on the remote host, and nothing needs to be arranged per terminal.
+set -u
+
+HOST="${1:-}"
+INTERVAL="${2:-3}"
+[ -n "$HOST" ] || { echo "usage: ${0##*/} <remote-host> [interval-seconds]" >&2; exit 2; }
+
+CLI="${CMUX_BUNDLED_CLI_PATH:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
+[ -x "$CLI" ] || { echo "cmux cli not found at $CLI" >&2; exit 3; }
+
+CONTROL="${TMPDIR:-/tmp}/cmux-remote-rows-$$"
+SOCKET_DEFAULT="$HOME/.local/state/cmux/cmux.sock"
+export CMUX_QUIET=1
+export CMUX_SOCKET_PATH="${CMUX_SOCKET_PATH:-$SOCKET_DEFAULT}"
+
+# The socket accepts a caller carrying a capability token. A process cmux started has one in its
+# environment; this one may have been started by anything, so it borrows a token from a terminal cmux
+# is running. Tokens change when cmux restarts, which is why this is asked again whenever a call fails.
+borrow_token() {
+    local pid token
+    for pid in $(pgrep -x fish 2>/dev/null; pgrep -x zsh 2>/dev/null; pgrep -x bash 2>/dev/null); do
+        token=$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n 's/^CMUX_SOCKET_CAPABILITY=//p' | head -1)
+        [ -n "$token" ] && { export CMUX_SOCKET_CAPABILITY="$token"; return 0; }
+    done
+    return 1
+}
+
+cmux_up() { [ -S "$CMUX_SOCKET_PATH" ]; }
+
+# One line per chat a client on the far side is looking at: the connection's port here, the
+# conversation, what it published, its directory, and whether it is waiting on an answer.
+remote_rows() {
+    ssh -o BatchMode=yes -o ConnectTimeout=8 \
+        -o ControlMaster=auto -o ControlPath="$CONTROL" -o ControlPersist=30 \
+        "$HOST" bash -s <<'REMOTE'
+set -u
+# Every login shell holds both its terminal and the ports of the connection that opened it, so one pass
+# over the process table pairs each pty with the port it arrived on.
+ports=$(for dir in /proc/[0-9]*; do
+    [ -r "$dir/environ" ] || continue
+    vars=$(tr '\0' '\n' < "$dir/environ" 2>/dev/null) || continue
+    tty=$(printf '%s\n' "$vars" | sed -n 's/^SSH_TTY=//p' | head -1)
+    [ -n "$tty" ] || continue
+    port=$(printf '%s\n' "$vars" | sed -n 's/^SSH_CONNECTION=//p' | head -1 | awk '{print $2}')
+    [ -n "$port" ] && printf '%s %s\n' "$tty" "$port"
+done | sort -u)
+
+tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | while read -r tty session; do
+    port=$(printf '%s\n' "$ports" | awk -v t="$tty" '$1 == t {print $2; exit}')
+    [ -n "$port" ] || continue
+    for f in "$HOME"/.claude/sessions/*.json; do
+        [ -f "$f" ] || continue
+        read -r sid tm published pid dir < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid, (.cwd // "-")] | @tsv' "$f" 2>/dev/null)
+        [ "${tm%%:*}" = "$session" ] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        # A chat stopped on a permission or a question is still inside its turn, so the published status
+        # reads as working. The notification hook records that state in a file instead.
+        waiting=no
+        [ -f "${XDG_CACHE_HOME:-$HOME/.cache}/agent-tmux/waiting/$sid" ] && waiting=yes
+        printf '%s\t%s\t%s\t%s\n' "$port" "$published" "$dir" "$waiting"
+        break
+    done
+done
+REMOTE
+}
+
+# The row a connection belongs to: the ssh holding that port, then the first process above it that cmux
+# started, which carries the workspace in its environment.
+workspace_for_port() {
+    local port="$1" pid cur up ws
+    for pid in $(pgrep -x ssh 2>/dev/null); do
+        lsof -a -nP -p "$pid" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | grep -q ":$port->" || continue
+        cur=$pid
+        for _ in 1 2 3 4 5 6; do
+            up=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ')
+            [ -n "$up" ] && [ "$up" != "1" ] || break
+            ws=$(ps eww -p "$up" 2>/dev/null | tr ' ' '\n' | sed -n 's/^CMUX_WORKSPACE_ID=//p' | head -1)
+            [ -n "$ws" ] && { printf '%s' "$ws"; return 0; }
+            cur=$up
+        done
+    done
+    return 1
+}
+
+# `busy` and `shell` are a turn or a command running; a chat waiting on an answer outranks both, since
+# that happens inside a turn and the published status cannot show it.
+phase_for() {
+    if [ "$2" = yes ]; then
+        printf 'asking'
+    else
+        case "$1" in
+            busy | shell) printf 'working' ;;
+            *) printf 'waiting' ;;
+        esac
+    fi
+}
+
+set_row() {
+    local ws="$1" phase="$2"
+    case "$phase" in
+        working) "$CLI" set-status remote_chat Running --icon bolt --color '#4c8dff' --priority 80 --workspace "$ws" >/dev/null 2>&1 ;;
+        asking) "$CLI" set-status remote_chat "Needs input" --icon questionmark.circle --color '#ffb02e' --priority 90 --workspace "$ws" >/dev/null 2>&1 ;;
+        *) "$CLI" set-status remote_chat Idle --icon moon --color '#8e8e93' --priority 40 --workspace "$ws" >/dev/null 2>&1 ;;
+    esac
+}
+
+clear_row() { "$CLI" clear-status remote_chat --workspace "$1" >/dev/null 2>&1; }
+
+# What each row was last told, as `workspace=phase;` pairs, so an unchanged row is left alone.
+shown=""
+
+finish() {
+    local pair
+    for pair in $(printf '%s' "$shown" | tr ';' ' '); do
+        clear_row "${pair%%=*}"
+    done
+    ssh -o ControlPath="$CONTROL" -O exit "$HOST" 2>/dev/null
+    exit 0
+}
+trap finish EXIT INT TERM
+
+while :; do
+    if cmux_up && { [ -n "${CMUX_SOCKET_CAPABILITY:-}" ] || borrow_token; }; then
+        rows=$(remote_rows 2>/dev/null)
+        seen=""
+        while IFS=$'\t' read -r port published dir waiting; do
+            [ -n "${port:-}" ] || continue
+            ws=$(workspace_for_port "$port") || continue
+            [ -n "$ws" ] || continue
+            phase=$(phase_for "$published" "${waiting:-no}")
+            case "$shown" in
+                *"$ws=$phase;"*) ;;
+                *) set_row "$ws" "$phase" ;;
+            esac
+            seen="$seen$ws=$phase;"
+        done <<<"$rows"
+
+        # A row that stopped reporting is a chat detached or ended, and leaving its last state up would
+        # keep saying something that has stopped being true.
+        for pair in $(printf '%s' "$shown" | tr ';' ' '); do
+            ws="${pair%%=*}"
+            case "$seen" in
+                *"$ws="*) ;;
+                *) clear_row "$ws" ;;
+            esac
+        done
+        shown="$seen"
+    fi
+    sleep "$INTERVAL"
+done
