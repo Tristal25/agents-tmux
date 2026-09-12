@@ -478,6 +478,23 @@ announce_dir() {
 
 # The session is created in the conversation's own directory, so choosing a row from anywhere
 # lands the agent in the tree that conversation is about.
+# Every live agent holding a conversation, which can be more than one when they run outside tmux.
+pids_holding() {
+    local want="$1" sid tm cwd pid rest
+    while IFS=$'\t' read -r sid tm cwd pid rest; do
+        [ "$sid" = "$want" ] && printf '%s\n' "$pid"
+    done < <(live_agents)
+}
+
+# A conversation id comes from a file name and is placed inside a single-quoted shell string, so
+# anything outside the alphabet ids use is refused rather than escaped.
+safe_id() {
+    case "$1" in
+        "" | *[!A-Za-z0-9._-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 start_session() {
     local session="$1" agent="$2" which="$3" dir="${4:-$(pwd -P)}" cmd
     if tmux has-session -t "=$session" 2>/dev/null; then
@@ -485,6 +502,13 @@ start_session() {
         return 0
     fi
     [ -d "$dir" ] || { printf 'no such directory: %s\n' "$dir" >&2; return 2; }
+    case "$which" in
+        "" | --new | --pick) ;;
+        *) safe_id "$which" || {
+               printf 'conversation id holds characters it should not: %s\n' "$which" >&2
+               return 2
+           } ;;
+    esac
     # A session holds exactly one conversation for its whole life, so a failed resume ends it
     # rather than falling back to a fresh chat: the fallback would leave the session holding a
     # conversation nobody asked for, under a name that says otherwise. The pause is there because
@@ -586,6 +610,13 @@ cmd_pick() {
                             || { echo "cancelled"; return 0; }
                         ;;
                 esac
+                # Every agent holding this conversation has to stop, not only the one the row
+                # recorded: leaving another running would put two of them back on one transcript.
+                local other
+                for other in $(pids_holding "$sid"); do
+                    [ "$other" = "$pid" ] && continue
+                    kill -TERM "$other" 2>/dev/null
+                done
                 pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
                 # Closing a terminal ends the whole foreground group, which the agent handles
                 # cleanly, so the group is the right target when the agent leads it. A group it

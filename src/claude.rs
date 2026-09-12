@@ -113,6 +113,15 @@ pub fn live_session_for(id: &str) -> Option<String> {
         .max_by_key(|name| sessions.get(name).map(|s| s.activity).unwrap_or(0))
 }
 
+/// Every live agent holding a conversation, which can be more than one when they run outside tmux.
+pub fn pids_holding(id: &str) -> Vec<i32> {
+    live_agents()
+        .into_iter()
+        .filter(|live| live.id == id)
+        .map(|live| live.pid)
+        .collect()
+}
+
 fn mtime(path: &Path) -> i64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
