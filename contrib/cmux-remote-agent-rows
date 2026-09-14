@@ -46,8 +46,12 @@ cmux_up() { [ -S "$CMUX_SOCKET_PATH" ]; }
 
 # One line per chat a client on the far side is looking at: what it published, whether it is waiting on
 # an answer, its directory, and its own title.
+# `ServerAlive` is the leash. A relayed connection can stop carrying traffic while the socket stays
+# open, and a read with nothing bounding it waits forever: the loop stops polling, the last state it
+# wrote stays on the row, and the row goes on claiming something that stopped being true.
 remote_rows() {
     ssh -o BatchMode=yes -o ConnectTimeout=8 \
+        -o ServerAliveInterval=4 -o ServerAliveCountMax=2 \
         -o ControlMaster=auto -o ControlPath="$CONTROL" -o ControlPersist=30 \
         "$HOST" bash -s <<'REMOTE'
 set -u
@@ -135,9 +139,11 @@ set_row() {
 clear_row() { "$CLI" clear-status remote_chat --workspace "$1" >/dev/null 2>&1; }
 
 # cmux writes its own agent line, under its own key, for a surface that has one of its agent sessions
-# bound. That line says the same thing in the same place, so a second one from here would only repeat
-# it: this stays quiet while it is up, and speaks for the row again once it goes.
-row_speaks_for_itself() { "$CLI" list-status --workspace "$1" 2>/dev/null | grep -q '^claude_code='; }
+# bound. For a chat on another machine that line comes from something reporting a lifecycle, and it
+# holds whatever it was last told: a reporter that stops or hangs leaves it saying `Running` for as long
+# as cmux keeps the binding. This has the far side's own answer every few seconds, so for a chat it can
+# see it takes the row over and drops the other line rather than deferring to it.
+drop_cmux_line() { "$CLI" clear-status claude_code --workspace "$1" >/dev/null 2>&1; }
 
 # A line written by an earlier run outlives that run, and a row this can no longer pair keeps showing
 # whatever it last said, which ages into a lie. Every row starts clear and is rebuilt from what the host
@@ -176,12 +182,7 @@ while :; do
         while IFS=$'\t' read -r published waiting dir title; do
             [ -n "${title:-}" ] || continue
             ws=$(workspace_for_title "$title") || continue
-            if row_speaks_for_itself "$ws"; then
-                # Clearing without checking covers a line left behind by an earlier run of this, which
-                # would otherwise sit under cmux's own line saying the same thing.
-                clear_row "$ws"
-                continue
-            fi
+            drop_cmux_line "$ws"
             phase=$(phase_for "$published" "${waiting:-no}")
             # Written every poll rather than on a change. cmux rebuilds a row's snapshot as you select
             # and move around the sidebar, and an entry can go with it; last write per key wins, so

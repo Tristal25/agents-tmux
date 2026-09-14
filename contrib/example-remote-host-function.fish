@@ -1,19 +1,24 @@
-# Start the reporter alongside an ssh to a host where your chats run, and end it with the shell.
+# Plain ssh is all a terminal needs: a single reporter on this machine gives every row its state.
 #
 # Rename `devbox` to whatever you call that host, keeping the ssh destination in step.
 function devbox --wraps ssh --description "ssh to the remote host where chats run"
-    # A chat on the far side cannot tell cmux what it is doing: cmux reads the state from a process it
-    # can trace into one of its own terminals, so a report sent from the other machine is ignored. The
-    # reporter runs here instead, in this terminal, and asks that host what its chat is doing.
-    #
-    # It is started beside the ssh rather than around it, which is what lets it find that connection
-    # and ask the far side about the one pty this terminal holds.
-    if set -q CMUX_SURFACE_ID; and test -x ~/agents-tmux/contrib/cmux-remote-agent-status; and test (count $argv) -eq 0
-        ~/agents-tmux/contrib/cmux-remote-agent-status devbox >/dev/null 2>&1 &
-        set -l reporter $last_pid
-        ssh -t devbox
-        kill $reporter 2>/dev/null
-        return
-    end
-    ssh devbox $argv
+    ssh -t devbox $argv
 end
+
+# `cmux-remote-agent-rows devbox` is what fills the rows, and it belongs somewhere that keeps it up for
+# as long as cmux runs, a launch agent being the obvious place. One process covers every terminal open to
+# that host, so nothing has to be started or stopped alongside a connection.
+#
+# `cmux-remote-agent-status` is the other way round: it lives inside one terminal and reports cmux's own
+# agent lifecycle for that surface, which is what draws cmux's spinner. It buys that at a price. cmux
+# holds a lifecycle until something ends it, so a reporter that stops or hangs leaves the row saying
+# `Running` until you notice, where the every-row reporter re-reads the truth every few seconds. Start it
+# beside the ssh only where the spinner is worth that:
+#
+#     if set -q CMUX_SURFACE_ID
+#         ~/agents-tmux/contrib/cmux-remote-agent-status devbox >/dev/null 2>&1 &
+#         set -l reporter $last_pid
+#         ssh -t devbox
+#         kill $reporter 2>/dev/null
+#         return
+#     end
