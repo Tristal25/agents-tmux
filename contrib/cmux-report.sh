@@ -22,6 +22,10 @@
 # removes it. A reporter watching from another machine reads that file to label the row.
 set -u
 
+# Agent settings travel between machines, so this can be registered on the machine running cmux too,
+# where cmux already knows what its own chats are doing and drops these sequences anyway.
+[ -d /Applications/cmux.app ] && exit 0
+
 MODE="${1:-notify}"
 
 PAYLOAD=""
