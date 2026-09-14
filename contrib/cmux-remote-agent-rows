@@ -8,11 +8,13 @@
 # rule: `set-status` names the workspace it applies to, so a single process can speak for every terminal
 # open to that host, including the ones that were already open before it started.
 #
-# Each poll asks the host which chats its attached clients are looking at, and gets back the connection
-# each one arrived on. A connection is visible from both ends, so the port names the ssh on this side,
-# and the surface holding that ssh names the row to write.
+# Pairing a remote chat with the row that shows it goes through the title. A chat publishes its own
+# title as the terminal's title, cmux keeps that as the surface's title, and the host knows which chat
+# each of its attached clients is looking at. Matching on the connection instead holds only for a direct
+# ssh: a `ProxyCommand` relay makes the port the host sees belong to the relay, and no process here owns
+# it. A title travels end to end whatever carries the connection.
 #
-#   tmux client on the far side ─ port ─ ssh here ─ surface ─ workspace ─ row
+#   chat on the far side ─ its title ─ surface title here ─ workspace ─ row
 #
 # Nothing needs to be installed on the remote host, and nothing needs to be arranged per terminal.
 set -u
@@ -25,13 +27,12 @@ CLI="${CMUX_BUNDLED_CLI_PATH:-/Applications/cmux.app/Contents/Resources/bin/cmux
 [ -x "$CLI" ] || { echo "cmux cli not found at $CLI" >&2; exit 3; }
 
 CONTROL="${TMPDIR:-/tmp}/cmux-remote-rows-$$"
-SOCKET_DEFAULT="$HOME/.local/state/cmux/cmux.sock"
 export CMUX_QUIET=1
-export CMUX_SOCKET_PATH="${CMUX_SOCKET_PATH:-$SOCKET_DEFAULT}"
+export CMUX_SOCKET_PATH="${CMUX_SOCKET_PATH:-$HOME/.local/state/cmux/cmux.sock}"
 
 # The socket accepts a caller carrying a capability token. A process cmux started has one in its
-# environment; this one may have been started by anything, so it borrows a token from a terminal cmux
-# is running. Tokens change when cmux restarts, which is why this is asked again whenever a call fails.
+# environment; this one may have been started by anything, so it borrows a token from a terminal cmux is
+# running. Tokens change when cmux restarts, which is why this is asked again on every pass.
 borrow_token() {
     local pid token
     for pid in $(pgrep -x fish 2>/dev/null; pgrep -x zsh 2>/dev/null; pgrep -x bash 2>/dev/null); do
@@ -43,59 +44,70 @@ borrow_token() {
 
 cmux_up() { [ -S "$CMUX_SOCKET_PATH" ]; }
 
-# One line per chat a client on the far side is looking at: the connection's port here, the
-# conversation, what it published, its directory, and whether it is waiting on an answer.
+# One line per chat a client on the far side is looking at: what it published, whether it is waiting on
+# an answer, its directory, and its own title.
 remote_rows() {
     ssh -o BatchMode=yes -o ConnectTimeout=8 \
         -o ControlMaster=auto -o ControlPath="$CONTROL" -o ControlPersist=30 \
         "$HOST" bash -s <<'REMOTE'
 set -u
-# Every login shell holds both its terminal and the ports of the connection that opened it, so one pass
-# over the process table pairs each pty with the port it arrived on.
-ports=$(for dir in /proc/[0-9]*; do
-    [ -r "$dir/environ" ] || continue
-    vars=$(tr '\0' '\n' < "$dir/environ" 2>/dev/null) || continue
-    tty=$(printf '%s\n' "$vars" | sed -n 's/^SSH_TTY=//p' | head -1)
-    [ -n "$tty" ] || continue
-    port=$(printf '%s\n' "$vars" | sed -n 's/^SSH_CONNECTION=//p' | head -1 | awk '{print $2}')
-    [ -n "$port" ] && printf '%s %s\n' "$tty" "$port"
-done | sort -u)
-
 tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | while read -r tty session; do
-    port=$(printf '%s\n' "$ports" | awk -v t="$tty" '$1 == t {print $2; exit}')
-    [ -n "$port" ] || continue
     for f in "$HOME"/.claude/sessions/*.json; do
         [ -f "$f" ] || continue
-        read -r sid tm published pid dir < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid, (.cwd // "-")] | @tsv' "$f" 2>/dev/null)
+        read -r sid tm published pid dir changed < <(jq -r '[.sessionId, (.tmux // "-"), (.status // "-"), .pid, (.cwd // "-"), (((.statusUpdatedAt // 0) / 1000) | floor)] | @tsv' "$f" 2>/dev/null)
         [ "${tm%%:*}" = "$session" ] || continue
         kill -0 "$pid" 2>/dev/null || continue
+
         # A chat stopped on a permission or a question is still inside its turn, so the published status
         # reads as working. The notification hook records that state in a file instead.
         waiting=no
-        [ -f "${XDG_CACHE_HOME:-$HOME/.cache}/agent-tmux/waiting/$sid" ] && waiting=yes
-        printf '%s\t%s\t%s\t%s\n' "$port" "$published" "$dir" "$waiting"
+        marker="${XDG_CACHE_HOME:-$HOME/.cache}/agent-tmux/waiting/$sid"
+        if [ -f "$marker" ]; then
+            # A marker older than the chat's last status change describes a moment that has passed: the
+            # chat moved on without the hook that clears it ever running, so the file goes.
+            mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null)
+            if [ -n "$mtime" ] && [ "$mtime" -lt "$changed" ]; then
+                rm -f "$marker" 2>/dev/null
+            else
+                waiting=yes
+            fi
+        fi
+
+        # The name the chat gave itself, which is also what it publishes as the terminal's title. A
+        # transcript reaches tens of megabytes, so only its tail is read.
+        key=$(printf '%s' "$dir" | sed 's|/|-|g')
+        title=$(tail -c 262144 "$HOME/.claude/projects/$key/$sid.jsonl" 2>/dev/null |
+            grep -o '"aiTitle":"[^"]*"' | tail -1 | sed 's/^"aiTitle":"//; s/"$//')
+
+        printf '%s\t%s\t%s\t%s\n' "$published" "$waiting" "$dir" "$title"
         break
     done
 done
 REMOTE
 }
 
-# The row a connection belongs to: the ssh holding that port, then the first process above it that cmux
-# started, which carries the workspace in its environment.
-workspace_for_port() {
-    local port="$1" pid cur up ws
-    for pid in $(pgrep -x ssh 2>/dev/null); do
-        lsof -a -nP -p "$pid" -iTCP -sTCP:ESTABLISHED -Fn 2>/dev/null | grep -q ":$port->" || continue
-        cur=$pid
-        for _ in 1 2 3 4 5 6; do
-            up=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ')
-            [ -n "$up" ] && [ "$up" != "1" ] || break
-            ws=$(ps eww -p "$up" 2>/dev/null | tr ' ' '\n' | sed -n 's/^CMUX_WORKSPACE_ID=//p' | head -1)
-            [ -n "$ws" ] && { printf '%s' "$ws"; return 0; }
-            cur=$up
-        done
+# Every terminal surface cmux is showing, as `workspace<TAB>title`.
+surface_titles() {
+    local id
+    for id in $("$CLI" list-workspaces --json --id-format uuids 2>/dev/null |
+        grep -o '"id"[^"]*"[0-9A-Fa-f-]\{36\}"' | grep -o '[0-9A-Fa-f-]\{36\}' | sort -u); do
+        "$CLI" list-pane-surfaces --workspace "$id" --json 2>/dev/null |
+            grep -o '"title"[^"]*"[^"]*"' | sed 's/^"title"[^"]*"//; s/"$//' |
+            while IFS= read -r title; do
+                [ -n "$title" ] && printf '%s\t%s\n' "$id" "$title"
+            done
     done
-    return 1
+}
+
+# The row showing a chat: the surface whose title ends with the chat's own. Two surfaces answering to
+# one title name no row in particular, so neither is written.
+workspace_for_title() {
+    local want="$1" matches
+    [ -n "$want" ] || return 1
+    matches=$(printf '%s\n' "$TITLES" | awk -F'\t' -v want="$want" '
+        length($2) >= length(want) && substr($2, length($2) - length(want) + 1) == want { print $1 }' | sort -u)
+    [ "$(printf '%s\n' "$matches" | grep -c .)" = "1" ] || return 1
+    printf '%s' "$matches"
 }
 
 # `busy` and `shell` are a turn or a command running; a chat waiting on an answer outranks both, since
@@ -127,8 +139,20 @@ clear_row() { "$CLI" clear-status remote_chat --workspace "$1" >/dev/null 2>&1; 
 # it: this stays quiet while it is up, and speaks for the row again once it goes.
 row_speaks_for_itself() { "$CLI" list-status --workspace "$1" 2>/dev/null | grep -q '^claude_code='; }
 
-# What each row was last told, as `workspace=phase;` pairs, so an unchanged row is left alone.
+# A line written by an earlier run outlives that run, and a row this can no longer pair keeps showing
+# whatever it last said, which ages into a lie. Every row starts clear and is rebuilt from what the host
+# reports.
+sweep_rows() {
+    local id
+    for id in $("$CLI" list-workspaces --json --id-format uuids 2>/dev/null |
+        grep -o '"id"[^"]*"[0-9A-Fa-f-]\{36\}"' | grep -o '[0-9A-Fa-f-]\{36\}' | sort -u); do
+        clear_row "$id"
+    done
+}
+
 shown=""
+swept=no
+TITLES=""
 
 finish() {
     local pair
@@ -141,13 +165,17 @@ finish() {
 trap finish EXIT INT TERM
 
 while :; do
-    if cmux_up && { [ -n "${CMUX_SOCKET_CAPABILITY:-}" ] || borrow_token; }; then
+    if cmux_up && borrow_token; then
+        if [ "$swept" = no ]; then
+            sweep_rows
+            swept=yes
+        fi
         rows=$(remote_rows 2>/dev/null)
+        TITLES=$(surface_titles)
         seen=""
-        while IFS=$'\t' read -r port published dir waiting; do
-            [ -n "${port:-}" ] || continue
-            ws=$(workspace_for_port "$port") || continue
-            [ -n "$ws" ] || continue
+        while IFS=$'\t' read -r published waiting dir title; do
+            [ -n "${title:-}" ] || continue
+            ws=$(workspace_for_title "$title") || continue
             if row_speaks_for_itself "$ws"; then
                 # Clearing without checking covers a line left behind by an earlier run of this, which
                 # would otherwise sit under cmux's own line saying the same thing.
@@ -155,9 +183,13 @@ while :; do
                 continue
             fi
             phase=$(phase_for "$published" "${waiting:-no}")
+            # Written every poll rather than on a change. cmux rebuilds a row's snapshot as you select
+            # and move around the sidebar, and an entry can go with it; last write per key wins, so
+            # repeating costs one socket call and the row comes back within an interval.
+            set_row "$ws" "$phase"
             case "$shown" in
                 *"$ws=$phase;"*) ;;
-                *) set_row "$ws" "$phase" ;;
+                *) printf '%s %s %s %s\n' "$(date +%H:%M:%S)" "${ws%%-*}" "$phase" "$title" ;;
             esac
             seen="$seen$ws=$phase;"
         done <<<"$rows"
