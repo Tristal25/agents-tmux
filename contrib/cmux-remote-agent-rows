@@ -127,11 +127,14 @@ phase_for() {
     fi
 }
 
+# The wording, icon and colour of the first two are cmux's own, so a chat on another machine reads the
+# same as one on this one. cmux draws nothing for an idle agent, so the third is this one's own choice: a
+# row that says nothing leaves you wondering whether the chat finished or the reporting stopped.
 set_row() {
     local ws="$1" phase="$2"
     case "$phase" in
-        working) "$CLI" set-status remote_chat Running --icon bolt --color '#4c8dff' --priority 80 --workspace "$ws" >/dev/null 2>&1 ;;
-        asking) "$CLI" set-status remote_chat "Needs input" --icon questionmark.circle --color '#ffb02e' --priority 90 --workspace "$ws" >/dev/null 2>&1 ;;
+        working) "$CLI" set-status remote_chat Running --icon bolt.fill --color '#4C8DFF' --priority 80 --workspace "$ws" >/dev/null 2>&1 ;;
+        asking) "$CLI" set-status remote_chat "Needs input" --icon bell.fill --color '#4C8DFF' --priority 90 --workspace "$ws" >/dev/null 2>&1 ;;
         *) "$CLI" set-status remote_chat Idle --icon moon --color '#8e8e93' --priority 40 --workspace "$ws" >/dev/null 2>&1 ;;
     esac
 }

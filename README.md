@@ -188,6 +188,8 @@ Three states reach the row, and the text is what reads at a glance:
 
 A pending permission or question is the one state the registry cannot express, because it happens inside a turn and the chat still reads as working. The notification hook is what knows about it, so it writes a file naming the conversation and the next prompt or turn end removes it. That file outranks the published status while it exists.
 
+`Running` and `Needs input` are written with the wording, icon and colour cmux uses for its own agents (`bolt.fill` and `bell.fill`, both `#4C8DFF`), so a chat on another machine reads exactly like one on this one. cmux draws nothing for an idle agent, so `Idle` is this tool's own: a row that goes blank between turns leaves you wondering whether the chat finished or the reporting stopped.
+
 The text arrives through `set-status`, which draws on any row. cmux's own spinner for a running agent sits behind a feature flag that ships off, so a row shows the text whether or not that flag has been turned on.
 
 **Pick a status key of your own.** `claude_code` belongs to cmux's agent hooks: it holds a value only while one of cmux's own agent sessions is bound to that surface, and the entry is dropped the moment none is. A key like `remote_chat` is yours and keeps whatever you set, which is why both scripts here use one.
