@@ -11,7 +11,7 @@ name = "agent_tmux"
 path = "src/lib.rs"
 
 [[bin]]
-name = "agent-tmux-rs"
+name = "agent-tmux"
 path = "src/main.rs"
 
 [dependencies]

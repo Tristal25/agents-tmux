@@ -20,36 +20,17 @@ Run it with no arguments and it prints one flat list: every live agent, every sa
 
 Terminal multiplexers keep a long-running agent alive; nothing keeps track of *which* agent is in *which* session. After a few days you have sessions named for whatever you typed at the time, several of them holding the same conversation, and no way to tell which one is mid-task. This asks the agents themselves and lays the answer out in one table.
 
-## Two implementations
-
-The Rust crate is the one to build on: it reads the same state 17 times faster and exposes it as a library, so another program can call `list()` instead of parsing output. The shell script stays as the reference implementation, useful where a compiler is not welcome.
-
-| | Rust | Shell |
-|---|---|---|
-| Command | `agent-tmux-rs` | `bin/agent-tmux` |
-| A full list of 7 chats | 33–35 ms | 567–591 ms |
-| Embeddable | yes, as `agent_tmux` | no |
-| Needs | `tmux`, Claude Code or Codex | `tmux`, `jq`, `bash` 4+ |
-
-The gap is mostly the read strategy. The title a chat gave itself is the last `ai-title` line in its transcript, and those files reach tens of megabytes: reading the tail costs a few kilobytes where parsing the whole file costs all of it.
-
 ## Install
-
-Rust:
 
 ```bash
 git clone https://github.com/Tristal25/agents-tmux.git ~/agents-tmux
 cd ~/agents-tmux && cargo build --release
-ln -s ~/agents-tmux/target/release/agent-tmux-rs ~/.local/bin/agent-tmux
+cp target/release/agent-tmux ~/.local/bin/
 ```
 
-Shell:
+It needs `tmux` and Claude Code or Codex, and nothing else at runtime: the crate is also a library, so another program can call `list()` rather than parse output.
 
-```bash
-ln -s ~/agents-tmux/bin/agent-tmux ~/.local/bin/agent-tmux
-```
-
-The shell version needs `jq` and `bash` 4 or newer. macOS ships bash 3.2, so install a current one (`brew install bash`) and it will be found ahead of the system copy.
+A full list of nine chats takes about 60 ms. Most of that budget goes on the read strategy. The title a chat gave itself is the last `ai-title` line in its transcript, and those files reach tens of megabytes, so the tail is read for a few kilobytes where parsing the whole file costs all of it.
 
 ## Embedding it
 
@@ -70,7 +51,7 @@ if let Some(chat) = list(&Scope::Everywhere).first() {
 
 ## It adapts to the machine
 
-Nothing is configured at install time. Both implementations look at what is present and offer only that:
+Nothing is configured at install time. It looks at what is present and offers only that:
 
 | On the machine | The list offers |
 |---|---|
@@ -88,7 +69,7 @@ codex is not installed on this machine
 
 A missing `~/.claude` or `~/.codex` is simply an empty contribution to the list, so a machine with one agent behaves as if the other never existed.
 
-Both run on Linux and macOS. Three places where the two systems disagree are handled rather than assumed: `date -r` means a file on GNU and an epoch on BSD, so file times come from whichever `stat` answers; `stty` takes `-F` on GNU and `-f` on BSD, asked once at startup; and a process is checked through `/proc` where it exists and with a signal that sends nothing where it does not.
+It runs on Linux and macOS. Two places where the systems disagree are handled rather than assumed: `stty` takes `-F` on GNU and `-f` on BSD, asked once at startup, and a process is checked through `/proc` where it exists and with a signal that sends nothing where it does not.
 
 ## What each state means
 
