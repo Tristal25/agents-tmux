@@ -78,19 +78,35 @@ work_epoch() {
     printf '%s' "$newest"
 }
 
+# A title is the newest entry of its kind, so the transcript is read from the end and jq is left to
+# die on a closed pipe at the first match. Reading it forwards costs a parse of the whole file, and a
+# transcript runs to tens of megabytes. GNU spells the reversal `tac`, BSD `tail -r`.
+if command -v tac >/dev/null 2>&1; then REVERSE=(tac); else REVERSE=(tail -r); fi
+
+# Only the first 52 characters of a title reach the screen, so every value is cut to 400 before any
+# regex touches it. A pasted file or a system reminder arrives as a single message of several hundred
+# kilobytes, and flattening whitespace across all of them is what makes the list take a minute.
+TITLE_SLICE=400
+
 title_of() {
     local f="$1" t
     [ -f "$f" ] || return 0
     # Claude names each session itself and rewrites that name as the work changes, so the newest
     # `ai-title` describes the task better than any single message does.
     # `gsub` flattens the name in the same pass: a newline inside it would split the row this
-    # feeds and shift every column after it.
-    t=$(jq -r 'select(.type=="ai-title") | .aiTitle | gsub("\\s+"; " ")' "$f" 2>/dev/null | grep -v '^$' | tail -1)
+    # feeds and shift every column after it. `--unbuffered` is what makes the early exit work:
+    # jq holding short lines back until it has a block would read to the end of the file anyway.
+    t=$("${REVERSE[@]}" "$f" 2>/dev/null \
+        | jq --unbuffered -r --argjson n "$TITLE_SLICE" \
+            'select(.type=="ai-title") | .aiTitle | .[0:$n] | gsub("\\s+"; " ")' 2>/dev/null \
+        | grep -v '^$' | head -1)
     # Without a title, fall back to the last thing typed. `gsub` flattens a multi-line message so
     # one entry stays one row, and the filter drops the injected shapes (system reminders, command
     # echoes, caveats) that nobody typed.
-    [ -n "$t" ] || t=$(jq -r 'select(.type=="user") | (if (.message.content|type)=="string" then .message.content else (.message.content[0].text // "") end) | gsub("\\s+"; " ")' "$f" 2>/dev/null \
-        | grep -vE '^$|^ *<|^Caveat:' | tail -1)
+    [ -n "$t" ] || t=$("${REVERSE[@]}" "$f" 2>/dev/null \
+        | jq --unbuffered -r --argjson n "$TITLE_SLICE" \
+            'select(.type=="user") | (if (.message.content|type)=="string" then .message.content else (.message.content[0].text // "") end) | .[0:$n] | gsub("\\s+"; " ")' 2>/dev/null \
+        | grep -vE '^$|^ *<|^Caveat:' | head -1)
     printf '%s' "$t"
 }
 
@@ -100,10 +116,11 @@ transcript_of() {
 
 # The directory a conversation belongs to, read from the transcript because the project directory
 # name replaces every `/` with `-` and a real dash in a path makes that substitution ambiguous.
-# `head -1` closes the pipe, so jq stops at the first match instead of scanning a 17 MB file.
+# `head -1` closes the pipe, so jq stops at the first match instead of scanning a 17 MB file, and
+# `--unbuffered` is what lets that happen on the first line rather than once a block of paths fills.
 cwd_of_transcript() {
     local d
-    d=$(jq -r 'select(.cwd) | .cwd' "$1" 2>/dev/null | head -1)
+    d=$(jq --unbuffered -r 'select(.cwd) | .cwd' "$1" 2>/dev/null | head -1)
     [ -n "$d" ] || d=$(printf '%s' "$(basename "$(dirname "$1")")" | sed 's|-|/|g')
     printf '%s' "$d"
 }
