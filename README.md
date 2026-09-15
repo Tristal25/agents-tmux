@@ -96,6 +96,18 @@ It runs on Linux and macOS. Two places where the systems disagree are handled ra
 
 **Ten chats a page.** `n` and `p` turn pages, and the two new-chat rows ride along on every one. Numbers stay absolute across pages, so what you type matches what you read, and Enter takes the first chat on the page in front of you. Reading the state costs a pass over every transcript, so it happens once and pages are drawn from memory. `AGENT_TMUX_PAGE_SIZE` sets a different size; the page indicator appears once there is more than one page.
 
+**A narrow terminal drops columns, not information.** What survives is what the choice is made on: the number, the state, and the name the chat gave itself. The rest goes in the order a reader can infer it, since the directory repeats down the list, the agent is one of two, and the age is a nicety.
+
+| Width | Columns |
+|---|---|
+| 100 and up | number, agent, state, age, directory, name |
+| 80 | number, state, age, directory, name |
+| 64 | number, state, directory, name |
+| 48 | number, state, name |
+| below | the name is cut |
+
+A resize is picked up between keypresses, so narrowing the window and widening it again leaves the list fitted to the window it is in. A listing piped to another program keeps every column whatever the terminal is doing.
+
 **A page turn replaces the view.** The picker takes the terminal's alternate screen while it runs, so each page is drawn over the last instead of scrolling another copy into the history, and the screen you started from comes back untouched when it ends. Anything a keypress has to say, a refused page turn or an agent this machine lacks, appears inside that view and clears itself on the next draw.
 
 **A session lives exactly as long as its chat.** tmux destroys a session when its command exits, so ending the agent removes the row. Detaching keeps it, which is the reason to run agents in tmux at all.

@@ -105,11 +105,81 @@ fn cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_default()
 }
 
-fn header() -> String {
-    format!(
-        " {:<2} {:<8} {:<11} {:<11} {:<31} {}\n",
-        "#", "AGENT", "STATE", "LAST USED", "DIRECTORY", "TASK"
-    )
+/// Which columns a width can afford, and how wide each one gets.
+///
+/// A narrow terminal gives up what a reader can infer before what it cannot. The directory repeats down
+/// the list and is usually the same one; the agent is one of two, and the state already implies it for
+/// a Codex row; the age is a nicety. The number, the state and the name are what the choice is actually
+/// made on, so they are the last to go.
+struct Layout {
+    agent: bool,
+    age: bool,
+    /// Characters for the directory, or none when it is dropped.
+    dir: usize,
+    task: usize,
+}
+
+impl Layout {
+    /// The columns other than the name, including the space that follows each.
+    fn before_task(&self) -> usize {
+        4 + 12
+            + if self.agent { 9 } else { 0 }
+            + if self.age { 12 } else { 0 }
+            + if self.dir > 0 { self.dir + 1 } else { 0 }
+    }
+
+    fn for_width(width: usize) -> Layout {
+        let mut l = Layout { agent: true, age: true, dir: 31, task: 0 };
+        // A name shorter than this stops being worth reading, so a column goes instead.
+        const NAME_FLOOR: usize = 24;
+        if width < l.before_task() + NAME_FLOOR {
+            l.agent = false;
+        }
+        if width < l.before_task() + NAME_FLOOR {
+            l.dir = 14;
+        }
+        if width < l.before_task() + NAME_FLOOR {
+            l.age = false;
+        }
+        if width < l.before_task() + NAME_FLOOR {
+            l.dir = 0;
+        }
+        l.task = width.saturating_sub(l.before_task()).max(6);
+        l
+    }
+}
+
+/// One row of cells, padded to the layout it was given.
+fn compose(l: &Layout, number: &str, agent: &str, state: &str, age: &str, dir: &str, task: &str) -> String {
+    let mut line = format!(" {number:<2} ");
+    if l.agent {
+        line.push_str(&format!("{agent:<8} "));
+    }
+    line.push_str(&format!("{state:<11} "));
+    if l.age {
+        line.push_str(&format!("{age:<11} "));
+    }
+    if l.dir > 0 {
+        let cut: String = short_to(dir, l.dir);
+        line.push_str(&format!("{:<width$} ", cut, width = l.dir));
+    }
+    line.push_str(&task.chars().take(l.task).collect::<String>());
+    line.push('\n');
+    line
+}
+
+/// A path cut from the left, since the end of it is the part that names the work.
+fn short_to(dir: &str, width: usize) -> String {
+    let count = dir.chars().count();
+    if count <= width {
+        return dir.to_string();
+    }
+    let tail: String = dir.chars().skip(count + 1 - width).collect();
+    format!("…{tail}")
+}
+
+fn header(l: &Layout) -> String {
+    compose(l, "#", "AGENT", "STATE", "LAST USED", "DIRECTORY", "TASK")
 }
 
 /// A path reads faster with the home part collapsed, and a long one is more recognisable by its tail
@@ -153,7 +223,7 @@ fn age(seconds: i64) -> String {
     }
 }
 
-fn row(number: &str, chat: &Chat) -> String {
+fn row(l: &Layout, number: &str, chat: &Chat) -> String {
     // Whether a terminal is already looking at it changes what choosing it does to that terminal,
     // so it earns a mark.
     let mut state = chat.state.as_str().to_string();
@@ -163,16 +233,16 @@ fn row(number: &str, chat: &Chat) -> String {
     let title = if chat.title.is_empty() {
         "(no title yet)".to_string()
     } else {
-        chat.title.chars().take(52).collect()
+        chat.title.clone()
     };
-    format!(
-        " {:<2} {:<8} {:<11} {:<11} {:<31} {}\n",
+    compose(
+        l,
         number,
         chat.agent.as_str(),
-        state,
-        age(chat.last_used),
-        short_dir(&chat.dir),
-        title
+        &state,
+        &age(chat.last_used),
+        &short_dir(&chat.dir),
+        &title,
     )
 }
 
@@ -190,25 +260,37 @@ fn offered() -> Vec<Agent> {
     Agent::ALL.into_iter().filter(|a| a.available()).collect()
 }
 
-fn new_rows(agents: &[Agent]) -> String {
+fn new_rows(l: &Layout, agents: &[Agent]) -> String {
     let dir = short_dir(&cwd());
     agents
         .iter()
         .map(|a| {
-            format!(
-                " {:<2} {:<8} {:<11} {:<11} {:<31} {}\n",
-                letter(*a), a.as_str(), "New", "-", dir, "empty conversation"
+            compose(
+                l,
+                &letter(*a).to_string(),
+                a.as_str(),
+                "New",
+                "-",
+                &dir,
+                "empty conversation",
             )
         })
         .collect()
 }
 
 fn print_all(chats: &[Chat], scope: &Scope) {
-    print!("{}", header());
+    // A listing read by another program keeps every column; one read by a person is fitted to the
+    // terminal in front of it.
+    let l = if io::stdout().is_terminal() {
+        Layout::for_width(terminal_width())
+    } else {
+        Layout::for_width(usize::MAX / 4)
+    };
+    print!("{}", header(&l));
     for (i, chat) in chats.iter().enumerate() {
-        print!("{}", row(&(i + 1).to_string(), chat));
+        print!("{}", row(&l, &(i + 1).to_string(), chat));
     }
-    print!("{}", new_rows(&offered()));
+    print!("{}", new_rows(&l, &offered()));
     println!("\n*  another terminal is looking at this chat right now");
     match scope {
         Scope::Everywhere => println!(
@@ -241,9 +323,9 @@ fn alt_screen(on: bool) {
 
 /// Whatever the last keypress had to say about itself, shown inside the next drawing. Printed as its
 /// own line it would push the view down, which is the thing being avoided.
-fn draw_notice(notice: &mut String) {
+fn draw_notice(notice: &mut String, width: usize) {
     if !notice.is_empty() {
-        println!("\n{notice}");
+        print!("{}", fit(&format!("\n{notice}\n"), width));
         notice.clear();
     }
 }
@@ -260,15 +342,16 @@ fn pick(chats: &[Chat]) {
     alt_screen(true);
     loop {
         let width = terminal_width();
+        let l = Layout::for_width(width);
         if io::stdin().is_terminal() {
             print!("\x1b[H\x1b[2J");
         }
-        print!("{}", fit(&header(), width));
+        print!("{}", header(&l));
         let last = (start + size).min(chats.len());
         for i in start..last {
-            print!("{}", fit(&row(&(i + 1).to_string(), &chats[i]), width));
+            print!("{}", row(&l, &(i + 1).to_string(), &chats[i]));
         }
-        print!("{}", fit(&new_rows(&agents), width));
+        print!("{}", new_rows(&l, &agents));
         if chats.len() > size {
             println!(
                 "\nchats {}-{} of {}, page {}/{}",
@@ -279,8 +362,8 @@ fn pick(chats: &[Chat]) {
                 (chats.len() + size - 1) / size
             );
         }
-        println!("\n*  another terminal is looking at this chat right now");
-        draw_notice(&mut notice);
+        print!("{}", fit("\n*  another terminal is looking at this chat right now\n", width));
+        draw_notice(&mut notice, width);
 
         let default = if chats.is_empty() {
             agents.first().map(|a| letter(*a).to_string()).unwrap_or_default()
@@ -296,11 +379,20 @@ fn pick(chats: &[Chat]) {
             prompt.push_str(", n/p page");
         }
         prompt.push_str(" (esc to quit): ");
+        // What the keys are stops being worth a wrapped line: a prompt longer than the terminal wraps
+        // and pushes the list it belongs to off the top.
+        if prompt.chars().count() > width {
+            prompt = format!("Choice [{default}]: ");
+        }
 
-        let Some(reply) = read_choice(&prompt) else {
+        let Some(choice) = read_choice(&prompt, width) else {
             alt_screen(false);
             println!("cancelled");
             return;
+        };
+        let reply = match choice {
+            Choice::Resized => continue,
+            Choice::Reply(reply) => reply,
         };
         let reply = if reply.is_empty() { default.clone() } else { reply };
 
@@ -473,6 +565,14 @@ fn fit(text: &str, width: usize) -> String {
         .collect()
 }
 
+/// What came back from the prompt: an answer, or the news that the terminal is a different size than
+/// the drawing assumed. A resize is worth acting on without a keypress, since a list fitted to a width
+/// that no longer applies stays wrong until something else happens.
+enum Choice {
+    Reply(String),
+    Resized,
+}
+
 /// What an escape turned out to be: a cancel, or a sequence to ignore.
 ///
 /// Arrow keys, and any other key the terminal spells as a sequence, arrive as escape then a handful of
@@ -504,17 +604,33 @@ fn escape_is_cancel(stdin: &mut io::Stdin) -> bool {
 /// A row number can run to several digits, while page turns and the new-chat rows are single letters
 /// that end the answer on their own. Arrow keys also begin with escape, so a bare one counts as
 /// cancel only when nothing follows it.
-fn read_choice(prompt: &str) -> Option<String> {
+fn read_choice(prompt: &str, drawn_width: usize) -> Option<Choice> {
     print!("{prompt}");
     let _ = io::stdout().flush();
     let raw = RawMode::enable();
     let mut typed = String::new();
     let mut stdin = io::stdin();
     let mut byte = [0u8; 1];
+    // A terminal's reads return empty every fifth of a second rather than blocking, which is what
+    // lets a resize be noticed. A pipe has no size to watch and no keys coming, so it keeps blocking
+    // and an empty read there still means the stream ended.
+    let watching = io::stdin().is_terminal();
+    if watching {
+        stty(&["min", "0", "time", "2"]);
+    }
     loop {
         // Nothing typed and the stream closed means no answer at all; treating it as the default
         // would act on a row nobody chose.
         if stdin.read(&mut byte).ok()? == 0 {
+            if watching {
+                // Mid-answer the size is left alone: redrawing would take the half-typed number with
+                // it, and the row it names is the same row at any width.
+                if typed.is_empty() && terminal_width() != drawn_width {
+                    drop(raw);
+                    return Some(Choice::Resized);
+                }
+                continue;
+            }
             if typed.is_empty() {
                 println!();
                 drop(raw);
@@ -553,7 +669,7 @@ fn read_choice(prompt: &str) -> Option<String> {
                 if typed.is_empty() {
                     println!("{}", c as char);
                     drop(raw);
-                    return Some((c as char).to_string());
+                    return Some(Choice::Reply((c as char).to_string()));
                 }
             }
             _ => {}
@@ -561,7 +677,7 @@ fn read_choice(prompt: &str) -> Option<String> {
     }
     println!();
     drop(raw);
-    Some(typed)
+    Some(Choice::Reply(typed))
 }
 
 /// Distinguishing a lone escape from an arrow key needs a short wait, and `stty` already owns the
@@ -569,7 +685,13 @@ fn read_choice(prompt: &str) -> Option<String> {
 fn read_with_timeout(stdin: &mut io::Stdin, buf: &mut [u8]) -> usize {
     stty(&["time", "1", "min", "0"]);
     let read = stdin.read(buf).unwrap_or(0);
-    stty(&["time", "0", "min", "1"]);
+    // Back to whichever mode the caller was reading in: a terminal polls so a resize is seen, a pipe
+    // blocks so an empty read still means the end of it.
+    if io::stdin().is_terminal() {
+        stty(&["min", "0", "time", "2"]);
+    } else {
+        stty(&["time", "0", "min", "1"]);
+    }
     read
 }
 
