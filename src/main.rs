@@ -112,8 +112,10 @@ fn cwd() -> PathBuf {
 /// a Codex row; the age is a nicety. The number, the state and the name are what the choice is actually
 /// made on, so they are the last to go.
 struct Layout {
+    width: usize,
     agent: bool,
     age: bool,
+    state: bool,
     /// Characters for the directory, or none when it is dropped.
     dir: usize,
     task: usize,
@@ -122,14 +124,14 @@ struct Layout {
 impl Layout {
     /// The columns other than the name, including the space that follows each.
     fn before_task(&self) -> usize {
-        4 + 12
+        4 + if self.state { 12 } else { 0 }
             + if self.agent { 9 } else { 0 }
             + if self.age { 12 } else { 0 }
             + if self.dir > 0 { self.dir + 1 } else { 0 }
     }
 
     fn for_width(width: usize) -> Layout {
-        let mut l = Layout { agent: true, age: true, dir: 31, task: 0 };
+        let mut l = Layout { width, agent: true, age: true, state: true, dir: 31, task: 0 };
         // A name shorter than this stops being worth reading, so a column goes instead.
         const NAME_FLOOR: usize = 24;
         if width < l.before_task() + NAME_FLOOR {
@@ -144,7 +146,13 @@ impl Layout {
         if width < l.before_task() + NAME_FLOOR {
             l.dir = 0;
         }
-        l.task = width.saturating_sub(l.before_task()).max(6);
+        // Down here the choice is between knowing which chat a row is and knowing what opening it
+        // does. The name wins: a number with nothing to identify it cannot be chosen on purpose, and
+        // the state is one keypress or one wider window away.
+        if width < l.before_task() + 8 {
+            l.state = false;
+        }
+        l.task = width.saturating_sub(l.before_task()).max(1);
         l
     }
 }
@@ -155,7 +163,9 @@ fn compose(l: &Layout, number: &str, agent: &str, state: &str, age: &str, dir: &
     if l.agent {
         line.push_str(&format!("{agent:<8} "));
     }
-    line.push_str(&format!("{state:<11} "));
+    if l.state {
+        line.push_str(&format!("{state:<11} "));
+    }
     if l.age {
         line.push_str(&format!("{age:<11} "));
     }
@@ -164,6 +174,10 @@ fn compose(l: &Layout, number: &str, agent: &str, state: &str, age: &str, dir: &
         line.push_str(&format!("{:<width$} ", cut, width = l.dir));
     }
     line.push_str(&task.chars().take(l.task).collect::<String>());
+    // The columns are sized to fit, and this is the guarantee rather than the intention: a window a few
+    // characters wide has no arithmetic that leaves room for everything, and a line over the width
+    // wraps, which is what the drawing is built to avoid.
+    let mut line: String = line.chars().take(l.width).collect();
     line.push('\n');
     line
 }
@@ -384,6 +398,9 @@ fn pick(chats: &[Chat]) {
         if prompt.chars().count() > width {
             prompt = format!("Choice [{default}]: ");
         }
+        if prompt.chars().count() > width {
+            prompt = format!("{default}> ");
+        }
 
         let Some(choice) = read_choice(&prompt, width) else {
             alt_screen(false);
@@ -546,7 +563,9 @@ fn terminal_width() -> usize {
     let from_stty = stty(&["size"])
         .and_then(|s| s.split_whitespace().nth(1).and_then(|c| c.parse::<usize>().ok()));
     let from_env = std::env::var("COLUMNS").ok().and_then(|c| c.parse::<usize>().ok());
-    from_stty.or(from_env).filter(|w| *w > 20).unwrap_or(120)
+    // A tiny terminal is still the terminal in front of someone. Only an answer too small to hold a
+    // number is treated as no answer at all, since that is a reporting failure rather than a window.
+    from_stty.or(from_env).filter(|w| *w >= 4).unwrap_or(120)
 }
 
 /// Cut to the width, counting characters: a title carries whatever the chat put in it, and cutting

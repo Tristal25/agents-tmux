@@ -104,7 +104,10 @@ It runs on Linux and macOS. Two places where the systems disagree are handled ra
 | 80 | number, state, age, directory, name |
 | 64 | number, state, directory, name |
 | 48 | number, state, name |
-| below | the name is cut |
+| 20 | number, name |
+| 6 | number, and whatever of the name fits |
+
+Below the state's own threshold the name keeps the space, since a number with nothing to identify it cannot be chosen on purpose, and the state is one wider window away. No drawn line exceeds the width at any size: the columns are sized to fit and the finished line is cut as well, because a window a few characters wide leaves no arithmetic that fits everything.
 
 A resize is picked up between keypresses, so narrowing the window and widening it again leaves the list fitted to the window it is in. A listing piped to another program keeps every column whatever the terminal is doing.
 
