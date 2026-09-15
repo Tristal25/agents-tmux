@@ -227,7 +227,14 @@ fn alt_screen(on: bool) {
     if !io::stdin().is_terminal() {
         return;
     }
-    let seq = if on { "\x1b[?1049h" } else { "\x1b[?1049l" };
+    // A terminal goes on reporting mouse movement for as long as some program has asked it to, and the
+    // last full-screen one may have left that on. Those reports arrive as escape sequences on the same
+    // stdin a keypress does, so the picker turns them off for its own screen rather than reading them.
+    let seq = if on {
+        "\x1b[?1049h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+    } else {
+        "\x1b[?1049l"
+    };
     print!("{seq}");
     let _ = io::stdout().flush();
 }
@@ -406,8 +413,7 @@ fn read_text(prompt: &str) -> Option<String> {
     while stdin.read(&mut byte).unwrap_or(0) > 0 {
         match byte[0] {
             0x1b => {
-                let mut rest = [0u8; 2];
-                if read_with_timeout(&mut stdin, &mut rest) == 0 {
+                if escape_is_cancel(&mut stdin) {
                     println!();
                     drop(raw);
                     return None;
@@ -432,6 +438,32 @@ fn read_text(prompt: &str) -> Option<String> {
     let _ = io::stdout().flush();
     drop(raw);
     Some(typed)
+}
+
+/// What an escape turned out to be: a cancel, or a sequence to ignore.
+///
+/// Arrow keys, and any other key the terminal spells as a sequence, arrive as escape then a handful of
+/// bytes. Mouse reporting sends the same shape on every movement, and those carry digits: consuming a
+/// fixed two bytes leaves the rest of `\x1b[<35;42;13M` to be read as an answer, so moving the mouse
+/// types into the prompt and can choose a row. A sequence is therefore read to its end, which for CSI
+/// and SS3 is the first byte in the final range.
+fn escape_is_cancel(stdin: &mut io::Stdin) -> bool {
+    let mut byte = [0u8; 1];
+    if read_with_timeout(stdin, &mut byte) == 0 {
+        return true;
+    }
+    match byte[0] {
+        b'[' | b'O' => {
+            // Parameters and intermediates run 0x20..0x3f; the byte that ends the sequence is above.
+            while read_with_timeout(stdin, &mut byte) != 0 {
+                if !(0x20..=0x3f).contains(&byte[0]) {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+    false
 }
 
 /// Read one answer with escape as cancel.
@@ -459,9 +491,7 @@ fn read_choice(prompt: &str) -> Option<String> {
         }
         match byte[0] {
             0x1b => {
-                let mut rest = [0u8; 2];
-                // A lone escape arrives with nothing behind it; an arrow key brings two more bytes.
-                if read_with_timeout(&mut stdin, &mut rest) == 0 {
+                if escape_is_cancel(&mut stdin) {
                     println!();
                     drop(raw);
                     return None;
