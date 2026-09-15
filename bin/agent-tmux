@@ -28,6 +28,22 @@ CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 SCOPE=all
 DEFAULT_AGENT=claude
 
+# A conversation belongs in this list when a person is having it. Claude Code also runs headless, for a
+# `-p` prompt or anything driving it through the SDK, and each of those runs registers itself and writes
+# a transcript exactly like a chat does. A tool calling it in a loop buries every row worth seeing.
+#
+# What separates them is the mode a terminal session declares for itself in its first entries. A
+# headless run has its prompt queued instead and declares no mode, whatever else it writes: it carries a
+# permission mode like a chat does, and it runs through the same `cli` entrypoint, so neither of those
+# tells them apart.
+#
+# The test asks for the interactive shape rather than looking for a headless one, so an unfamiliar way
+# of starting a chat has to prove itself before it is shown. Both records point at the same transcript,
+# which is why one test serves the running agents and the saved conversations alike.
+interactive_chat() {
+    head -c 16384 "${1:-}" 2>/dev/null | grep -qm1 '"type":"mode"'
+}
+
 # Claude Code registers every running agent under ~/.claude/sessions/<pid>.json, holding the
 # conversation id, the cwd, the tmux session it sits in, and the agent's own published status.
 # That file is what makes the state exact: a process walk can only guess which conversation a pane
@@ -40,6 +56,7 @@ live_agents() {
         [ -f "$f" ] || continue
         IFS=$'\t' read -r sid tmuxref cwd pid status stamp < <(jq -r 'select(.sessionId != null) | [.sessionId, (.tmux // "-"), (.cwd // "-"), .pid, (.status // "-"), (((.statusUpdatedAt // 0) / 1000) | floor)] | @tsv' "$f" 2>/dev/null)
         [ -n "${sid:-}" ] || continue
+        interactive_chat "$(transcript_of "$sid" "$cwd")" || continue
         # A file outlives its process, and a recycled pid would otherwise read as running.
         kill -0 "${pid:-0}" 2>/dev/null || continue
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$sid" "${tmuxref%%:*}" "$cwd" "$pid" "$status" "$stamp"
@@ -220,6 +237,7 @@ collect_rows() {
             [ -f "$f" ] || continue
             id=$(basename "$f" .jsonl)
             [ -z "${running[$id]:-}" ] || continue
+            interactive_chat "$f" || continue
             epoch=$(mtime "$f")
             printf '%s\tclaude\t%s\tExited\t-\t0\t1\t-\t%s\t%s\n' \
                 "$epoch" "$id" "$(cwd_of_transcript "$f")" \

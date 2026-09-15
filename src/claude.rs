@@ -50,6 +50,22 @@ struct Live {
     stamp: i64,
 }
 
+/// Whether a person is having this conversation. A headless run, `-p` or anything through the SDK,
+/// registers itself and writes a transcript exactly like a chat does, and a tool calling it in a loop
+/// buries every row worth seeing. Only a terminal session declares a mode in its first entries: a
+/// headless run has its prompt queued instead, carries a permission mode like a chat does, and shares
+/// the same `cli` entrypoint, so the mode is what tells them apart. Asking for the interactive shape
+/// leaves an unfamiliar way of starting a chat to prove itself rather than assuming it belongs.
+fn interactive_chat(transcript: &Path) -> bool {
+    const NEEDLE: &[u8] = br#""type":"mode""#;
+    let Ok(mut file) = File::open(transcript) else {
+        return false;
+    };
+    let mut head = vec![0u8; 16 * 1024];
+    let read = file.read(&mut head).unwrap_or(0);
+    head[..read].windows(NEEDLE.len()).any(|w| w == NEEDLE)
+}
+
 /// A registry file outlives its process, and a recycled pid would otherwise read as running, so
 /// each entry is confirmed against the process table.
 fn process_alive(pid: i32) -> bool {
@@ -77,9 +93,13 @@ fn live_agents() -> Vec<Live> {
         if !process_alive(reg.pid) {
             continue;
         }
+        let dir = PathBuf::from(reg.cwd.clone().unwrap_or_default());
+        if !interactive_chat(&transcript_path(&reg.session_id, &dir)) {
+            continue;
+        }
         out.push(Live {
             id: reg.session_id,
-            dir: PathBuf::from(reg.cwd.unwrap_or_default()),
+            dir,
             pid: reg.pid,
             // The pane reference carries window and pane after a colon; the session is the part
             // anything can be attached to.
@@ -330,7 +350,7 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if live_ids.contains(&id) {
+        if live_ids.contains(&id) || !interactive_chat(&transcript) {
             continue;
         }
         out.push(Chat {
