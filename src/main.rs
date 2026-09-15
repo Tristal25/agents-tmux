@@ -384,19 +384,55 @@ fn pick(chats: &[Chat]) {
         } else {
             (start + 1).to_string()
         };
-        let offers: Vec<String> = agents
-            .iter()
-            .map(|a| format!("{} new {} chat", letter(*a), a.as_str()))
-            .collect();
-        let mut prompt = format!("Choice [{default}], {}", offers.join(", "));
-        if chats.len() > size {
-            prompt.push_str(", n/p page");
+        // Each key is named with what it does, since a bare `a` reads as the word rather than as a
+        // key, and the default is stated as the keypress that takes it rather than as a bracketed
+        // number that leaves you to guess.
+        let paging = chats.len() > size;
+        let mut parts: Vec<String> = Vec::new();
+        if !chats.is_empty() {
+            parts.push(format!("type a number to open, enter opens {default}"));
         }
-        prompt.push_str(" (esc to quit): ");
-        // What the keys are stops being worth a wrapped line: a prompt longer than the terminal wraps
-        // and pushes the list it belongs to off the top.
+        parts.extend(
+            agents
+                .iter()
+                .map(|a| format!("{} starts a {} chat", letter(*a), a.as_str())),
+        );
+        if paging {
+            parts.push("n and p turn the page".to_string());
+        }
+        parts.push("esc quits".to_string());
+        let mut prompt = format!("{} > ", parts.join(", "));
+
+        // The same wording will not fit every window, so it gives up detail the way the columns do:
+        // the keys keep their names, then lose them, and the last form is the default alone.
         if prompt.chars().count() > width {
-            prompt = format!("Choice [{default}]: ");
+            let mut brief: Vec<String> = Vec::new();
+            if !chats.is_empty() {
+                brief.push(format!("number opens, enter = {default}"));
+            }
+            brief.extend(agents.iter().map(|a| format!("{} = {}", letter(*a), a.as_str())));
+            if paging {
+                brief.push("n/p = page".to_string());
+            }
+            brief.push("esc = quit".to_string());
+            prompt = format!("{} > ", brief.join(", "));
+        }
+        // Narrower again, the keys are listed without saying what they do: which keys exist is the part
+        // that cannot be guessed.
+        if prompt.chars().count() > width {
+            let mut keys: Vec<String> = Vec::new();
+            if !chats.is_empty() {
+                keys.push("number".to_string());
+            }
+            keys.extend(agents.iter().map(|a| letter(*a).to_string()));
+            if paging {
+                keys.push("n/p".to_string());
+            }
+            keys.push("esc".to_string());
+            prompt = format!("{} > ", keys.join(", "));
+        }
+        if prompt.chars().count() > width {
+            prompt = format!("enter = {default} > ");
         }
         if prompt.chars().count() > width {
             prompt = format!("{default}> ");
@@ -458,7 +494,7 @@ fn pick(chats: &[Chat]) {
                     // confirmed rather than assumed.
                     if chat.state == agent_tmux::State::Running {
                         println!("That chat is working right now, so ending it drops what it is mid-way through.");
-                        match read_text("enter = end it and reopen under tmux, esc = cancel: ") {
+                        match read_text("enter ends it and reopens under tmux, esc cancels > ") {
                             None => {
                                 println!("cancelled");
                                 return;
@@ -489,7 +525,17 @@ fn act(action: &Action) {
 /// `/home/you/x` would otherwise file one directory under two names.
 fn ask_dir() -> Option<PathBuf> {
     let here = cwd();
-    let reply = read_text(&format!("directory [{}] (esc to quit): ", short_dir(&here)))?;
+    // Named the same way the picker's prompt is: what the key does, rather than a bracketed value that
+    // leaves you to work out which key takes it.
+    let width = terminal_width();
+    let mut prompt = format!("directory for the new chat, enter for {} > ", short_dir(&here));
+    if prompt.chars().count() > width {
+        prompt = format!("directory, enter = {} > ", short_dir(&here));
+    }
+    if prompt.chars().count() > width {
+        prompt = "directory > ".to_string();
+    }
+    let reply = read_text(&prompt)?;
     if reply.is_empty() {
         return Some(here);
     }
