@@ -1,7 +1,7 @@
 //! The command line over the library: print the list, or act on the row you choose.
 
 use agent_tmux::{list, model::Action, open, Agent, Chat, Scope};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -219,6 +219,28 @@ fn print_all(chats: &[Chat], scope: &Scope) {
     }
 }
 
+/// Paging replaces the view rather than adding to it, so the picker runs on the terminal's alternate
+/// screen: each page is drawn over the last, and the shell's own screen comes back untouched when the
+/// picker ends. Handing a row off to tmux replaces this process, which never unwinds, so leaving the
+/// alternate screen happens there by hand.
+fn alt_screen(on: bool) {
+    if !io::stdin().is_terminal() {
+        return;
+    }
+    let seq = if on { "\x1b[?1049h" } else { "\x1b[?1049l" };
+    print!("{seq}");
+    let _ = io::stdout().flush();
+}
+
+/// Whatever the last keypress had to say about itself, shown inside the next drawing. Printed as its
+/// own line it would push the view down, which is the thing being avoided.
+fn draw_notice(notice: &mut String) {
+    if !notice.is_empty() {
+        println!("\n{notice}");
+        notice.clear();
+    }
+}
+
 fn pick(chats: &[Chat]) {
     let size = page_size();
     let agents = offered();
@@ -227,7 +249,12 @@ fn pick(chats: &[Chat]) {
         return;
     }
     let mut start = 0usize;
+    let mut notice = String::new();
+    alt_screen(true);
     loop {
+        if io::stdin().is_terminal() {
+            print!("\x1b[H\x1b[2J");
+        }
         print!("{}", header());
         let last = (start + size).min(chats.len());
         for i in start..last {
@@ -245,6 +272,7 @@ fn pick(chats: &[Chat]) {
             );
         }
         println!("\n*  another terminal is looking at this chat right now");
+        draw_notice(&mut notice);
 
         let default = if chats.is_empty() {
             agents.first().map(|a| letter(*a).to_string()).unwrap_or_default()
@@ -262,6 +290,7 @@ fn pick(chats: &[Chat]) {
         prompt.push_str(" (esc to quit): ");
 
         let Some(reply) = read_choice(&prompt) else {
+            alt_screen(false);
             println!("cancelled");
             return;
         };
@@ -272,29 +301,28 @@ fn pick(chats: &[Chat]) {
                 if start + size < chats.len() {
                     start += size;
                 } else {
-                    println!("already on the last page");
+                    notice = "already on the last page".to_string();
                 }
-                println!();
                 continue;
             }
             "p" | "P" => {
                 if start >= size {
                     start -= size;
                 } else {
-                    println!("already on the first page");
+                    notice = "already on the first page".to_string();
                 }
-                println!();
                 continue;
             }
             "a" | "A" | "b" | "B" => {
                 let wanted = if reply.eq_ignore_ascii_case("a") { Agent::Claude } else { Agent::Codex };
                 if !agents.contains(&wanted) {
-                    println!("{} is not installed on this machine\n", wanted.as_str());
+                    notice = format!("{} is not installed on this machine", wanted.as_str());
                     continue;
                 }
                 let agent = wanted;
                 // The directory is the one thing worth asking about, since a new chat has no
                 // history to take it from.
+                alt_screen(false);
                 let Some(dir) = ask_dir() else {
                     println!("cancelled");
                     return;
@@ -323,6 +351,7 @@ fn pick(chats: &[Chat]) {
                     }
                     println!("ending pid {pid} so the conversation can reopen under tmux");
                 }
+                alt_screen(false);
                 act(&chat.action());
                 return;
             }

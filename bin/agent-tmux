@@ -419,6 +419,27 @@ index_of_letter() {
     return 1
 }
 
+# Paging replaces the view rather than adding to it, so the picker runs on the terminal's alternate
+# screen: each page is drawn over the last, and the shell's own screen comes back untouched when the
+# picker ends. `exec` never runs an EXIT trap, so leaving the alternate screen is also done by hand
+# wherever a row hands off to tmux.
+ALT_SCREEN=0
+alt_screen_on() {
+    [ -t 1 ] || return 0
+    printf '\033[?1049h'
+    ALT_SCREEN=1
+}
+
+alt_screen_off() {
+    [ "$ALT_SCREEN" = 1 ] || return 0
+    printf '\033[?1049l'
+    ALT_SCREEN=0
+}
+
+# What a keypress had to say about itself, shown inside the next drawing. Printing it as its own line
+# would push the view down, which is the thing being avoided.
+NOTICE=""
+
 header() { printf ' #  %-8s %-11s %-11s %-31s %s\n' AGENT STATE 'LAST USED' DIRECTORY TASK; }
 
 # The two new-chat rows ride along on every page, since starting one is worth reaching without
@@ -427,6 +448,7 @@ print_page() {
     local start="$1" chats="$CHAT_COUNT" i last
     last=$(( start + PAGE_SIZE ))
     [ "$last" -gt "$chats" ] && last="$chats"
+    [ "$ALT_SCREEN" = 1 ] && printf '\033[H\033[2J'
     header
     for (( i = start; i < last; i++ )); do
         printf '%s\n' "${LINES[$i]}"
@@ -437,6 +459,8 @@ print_page() {
             $(( start / PAGE_SIZE + 1 )) $(( (chats + PAGE_SIZE - 1) / PAGE_SIZE ))
     fi
     printf '\n*  another terminal is looking at this chat right now\n'
+    [ -n "$NOTICE" ] && printf '\n%s\n' "$NOTICE"
+    NOTICE=""
     return 0
 }
 
@@ -473,6 +497,7 @@ auto_name() {
 # Inside tmux, `switch-client` moves the client you are using; attaching there would stack a tmux
 # inside a tmux, with two status bars and a doubled prefix key.
 attach_session() {
+    alt_screen_off
     local target="$1"
     local target_dir
     target_dir=$(tmux display -pt "=$target" '#{pane_current_path}' 2>/dev/null)
@@ -569,15 +594,19 @@ start_session() {
             printf 'tmux refused to create the session %s\n' "$session" >&2
             return 1
         fi
+        alt_screen_off
         exec tmux switch-client -t "=$session"
     fi
     announce_dir "$dir"
+    alt_screen_off
     exec tmux new -s "$session" -c "$dir" "$cmd"
 }
 
 cmd_pick() {
     load_rows
     local chats="$CHAT_COUNT" start=0 default choice prompt index=-1
+    alt_screen_on
+    trap alt_screen_off EXIT INT TERM
     while :; do
         print_page "$start"
         # Enter takes the first chat on the page you are looking at, so the default follows you.
@@ -594,21 +623,21 @@ cmd_pick() {
         case "${REPLY_LINE:-$default}" in
             n | N)
                 if [ $(( start + PAGE_SIZE )) -lt "$chats" ]; then start=$(( start + PAGE_SIZE ))
-                else printf 'already on the last page\n'; fi
-                printf '\n'; continue ;;
+                else NOTICE='already on the last page'; fi
+                continue ;;
             p | P)
                 if [ "$start" -gt 0 ]; then start=$(( start - PAGE_SIZE ))
-                else printf 'already on the first page\n'; fi
-                printf '\n'; continue ;;
+                else NOTICE='already on the first page'; fi
+                continue ;;
             a | A | b | B)
                 letter=$(printf '%s' "${REPLY_LINE:-$default}" | tr 'AB' 'ab')
                 if index=$(index_of_letter "$letter"); then break; fi
-                printf 'no %s agent on this machine\n\n' "$([ "$letter" = a ] && echo claude || echo codex)"
+                NOTICE=$(printf 'no %s agent on this machine' "$([ "$letter" = a ] && echo claude || echo codex)")
                 continue ;;
         esac
         choice="${REPLY_LINE:-$default}"
         case "$choice" in
-            *[!0-9]* | '') printf 'Not a choice: %s\n\n' "$choice"; continue ;;
+            *[!0-9]* | '') NOTICE=$(printf 'not a choice: %s' "$choice"); continue ;;
         esac
         if [ "$choice" -ge 1 ] && [ "$choice" -le "$chats" ]; then
             index=$(( choice - 1 ))

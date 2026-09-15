@@ -113,6 +113,8 @@ Both run on Linux and macOS. Three places where the two systems disagree are han
 
 **Ten chats a page.** `n` and `p` turn pages, and the two new-chat rows ride along on every one. Numbers stay absolute across pages, so what you type matches what you read, and Enter takes the first chat on the page in front of you. Reading the state costs a pass over every transcript, so it happens once and pages are drawn from memory. `AGENT_TMUX_PAGE_SIZE` sets a different size; the page indicator appears once there is more than one page.
 
+**A page turn replaces the view.** The picker takes the terminal's alternate screen while it runs, so each page is drawn over the last instead of scrolling another copy into the history, and the screen you started from comes back untouched when it ends. Anything a keypress has to say, a refused page turn or an agent this machine lacks, appears inside that view and clears itself on the next draw.
+
 **A session lives exactly as long as its chat.** tmux destroys a session when its command exits, so ending the agent removes the row. Detaching keeps it, which is the reason to run agents in tmux at all.
 
 ## Usage
