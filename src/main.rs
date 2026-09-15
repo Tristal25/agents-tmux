@@ -259,15 +259,16 @@ fn pick(chats: &[Chat]) {
     let mut notice = String::new();
     alt_screen(true);
     loop {
+        let width = terminal_width();
         if io::stdin().is_terminal() {
             print!("\x1b[H\x1b[2J");
         }
-        print!("{}", header());
+        print!("{}", fit(&header(), width));
         let last = (start + size).min(chats.len());
         for i in start..last {
-            print!("{}", row(&(i + 1).to_string(), &chats[i]));
+            print!("{}", fit(&row(&(i + 1).to_string(), &chats[i]), width));
         }
-        print!("{}", new_rows(&agents));
+        print!("{}", fit(&new_rows(&agents), width));
         if chats.len() > size {
             println!(
                 "\nchats {}-{} of {}, page {}/{}",
@@ -419,6 +420,13 @@ fn read_text(prompt: &str) -> Option<String> {
                     return None;
                 }
             }
+            // Raw mode hands these over as bytes rather than as signals, and a picker that ignores
+            // them leaves the habit of pressing them doing nothing at all.
+            0x03 | 0x04 => {
+                println!();
+                drop(raw);
+                return None;
+            }
             b'\n' | b'\r' => break,
             0x7f | 0x08 => {
                 if typed.pop().is_some() {
@@ -438,6 +446,31 @@ fn read_text(prompt: &str) -> Option<String> {
     let _ = io::stdout().flush();
     drop(raw);
     Some(typed)
+}
+
+/// The terminal's width, so a row is cut rather than wrapped. A wrapped row occupies two lines, and a
+/// redraw that clears what it thinks it drew then leaves half of it behind.
+fn terminal_width() -> usize {
+    let from_stty = stty(&["size"])
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|c| c.parse::<usize>().ok()));
+    let from_env = std::env::var("COLUMNS").ok().and_then(|c| c.parse::<usize>().ok());
+    from_stty.or(from_env).filter(|w| *w > 20).unwrap_or(120)
+}
+
+/// Cut to the width, counting characters: a title carries whatever the chat put in it, and cutting
+/// bytes would split one in half.
+fn fit(text: &str, width: usize) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            let body = line.trim_end_matches('\n');
+            let cut: String = body.chars().take(width).collect();
+            if line.ends_with('\n') {
+                format!("{cut}\n")
+            } else {
+                cut
+            }
+        })
+        .collect()
 }
 
 /// What an escape turned out to be: a cancel, or a sequence to ignore.
@@ -496,6 +529,13 @@ fn read_choice(prompt: &str) -> Option<String> {
                     drop(raw);
                     return None;
                 }
+            }
+            // Raw mode hands these over as bytes rather than as signals, and a picker that ignores
+            // them leaves the habit of pressing them doing nothing at all.
+            0x03 | 0x04 => {
+                println!();
+                drop(raw);
+                return None;
             }
             b'\n' | b'\r' => break,
             0x7f | 0x08 => {

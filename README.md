@@ -92,6 +92,8 @@ It runs on Linux and macOS. Two places where the systems disagree are handled ra
 
 **Session names are derived, never asked for.** They become `<agent>-<directory>`, numbered when that name is taken. tmux needs a name to reattach by; you do not need to think about it.
 
+**Fifty chats at most, newest first.** A conversation older than that falls off the end, where the agent's own `--resume` picker still reaches it. The limit is on the reading as much as the reading matter: transcripts are opened newest first and the rest are never touched, so the time a listing takes follows this number rather than however many conversations have piled up. Against 4000 transcripts that is 100 ms with the limit and 457 ms without. `AGENT_TMUX_MAX_CHATS` sets a different one.
+
 **Ten chats a page.** `n` and `p` turn pages, and the two new-chat rows ride along on every one. Numbers stay absolute across pages, so what you type matches what you read, and Enter takes the first chat on the page in front of you. Reading the state costs a pass over every transcript, so it happens once and pages are drawn from memory. `AGENT_TMUX_PAGE_SIZE` sets a different size; the page indicator appears once there is more than one page.
 
 **A page turn replaces the view.** The picker takes the terminal's alternate screen while it runs, so each page is drawn over the last instead of scrolling another copy into the history, and the screen you started from comes back untouched when it ends. Anything a keypress has to say, a refused page turn or an agent this machine lacks, appears inside that view and clears itself on the next draw.

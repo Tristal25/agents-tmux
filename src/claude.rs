@@ -16,6 +16,18 @@ const WORKING: [&str; 2] = ["busy", "shell"];
 /// entry can carry a large tool result.
 const TAIL_WINDOW: u64 = 512 * 1024;
 
+/// How many chats the list carries at most. Reading one costs a head and a tail of its transcript, so
+/// the newest are read first and the rest are never opened: the cost follows this number rather than
+/// however many conversations have piled up on the machine. A conversation old enough to fall off the
+/// end is one the agent's own `--resume` picker still reaches.
+pub fn max_chats() -> usize {
+    std::env::var("AGENT_TMUX_MAX_CHATS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(50)
+}
+
 /// A registry entry, written per running agent as `~/.claude/sessions/<pid>.json`.
 #[derive(Debug, Deserialize)]
 struct Registry {
@@ -198,8 +210,11 @@ pub fn title_of(transcript: &Path) -> String {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if value.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
             if let Some(title) = value.get("aiTitle").and_then(|t| t.as_str()) {
-                if !title.is_empty() {
-                    return title.to_string();
+                // Flattened for the same reason the typed text is: a newline inside a name would end
+                // the row it is printed in and shift every column after it.
+                let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !flat.is_empty() {
+                    return flat;
                 }
             }
         }
@@ -345,7 +360,11 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
     let live_ids: Vec<String> = by_id.keys().cloned().collect();
     let mut out: Vec<Chat> = by_id.into_values().collect();
 
+    let cap = max_chats();
     for transcript in transcripts(scope) {
+        if out.len() >= cap {
+            break;
+        }
         let id = transcript
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -404,5 +423,7 @@ fn transcripts(scope: &Scope) -> Vec<PathBuf> {
             }
         }
     }
+    // Newest first, so a cap on the rows is also a cap on the transcripts opened.
+    out.sort_by_key(|path| std::cmp::Reverse(mtime(path)));
     out
 }
