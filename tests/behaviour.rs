@@ -129,3 +129,40 @@ fn an_unnamed_chat_falls_back_to_what_was_typed() {
     assert_eq!(agent_tmux::claude::title_of(&path), "what I asked for");
     std::fs::remove_file(&path).ok();
 }
+
+/// A chat is dated by what its conversation last recorded, not by the file's own timestamp: an agent
+/// holds its transcript open and can touch it without adding an entry, which is what made an idle chat
+/// read as used minutes ago while the last thing said in it was a day old.
+#[test]
+fn a_chat_is_dated_by_its_own_last_entry() {
+    let dir = std::env::temp_dir().join("agent-tmux-clock-test");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let path = dir.join("dated.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    writeln!(file, r#"{{"type":"mode","mode":"normal"}}"#).unwrap();
+    writeln!(file, r#"{{"type":"user","timestamp":"2026-09-15T08:02:46.880Z"}}"#).unwrap();
+    drop(file);
+    assert_eq!(agent_tmux::claude::last_activity(&path), Some(1_789_459_366));
+
+    // A leap day is the case the day arithmetic gets wrong when it treats a year as starting in
+    // January, so it earns its own reading.
+    let leap = dir.join("leap.jsonl");
+    let mut file = std::fs::File::create(&leap).unwrap();
+    writeln!(file, r#"{{"type":"assistant","timestamp":"2024-02-29T23:59:59.000Z"}}"#).unwrap();
+    drop(file);
+    assert_eq!(agent_tmux::claude::last_activity(&leap), Some(1_709_251_199));
+
+    // The epoch itself, and an entry carrying no time at all.
+    let epoch = dir.join("epoch.jsonl");
+    let mut file = std::fs::File::create(&epoch).unwrap();
+    writeln!(file, r#"{{"type":"user","timestamp":"1970-01-01T00:00:00.000Z"}}"#).unwrap();
+    drop(file);
+    assert_eq!(agent_tmux::claude::last_activity(&epoch), Some(0));
+
+    let undated = dir.join("undated.jsonl");
+    std::fs::write(&undated, "{\"type\":\"mode\",\"mode\":\"normal\"}\n").unwrap();
+    assert_eq!(agent_tmux::claude::last_activity(&undated), None);
+
+    std::fs::remove_dir_all(&dir).ok();
+}

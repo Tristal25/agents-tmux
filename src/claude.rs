@@ -186,13 +186,48 @@ fn work_epoch(transcript: &Path) -> i64 {
 /// to reach its final lines costs far more than the answer is worth. Without a title, the last
 /// thing typed stands in, skipping the injected shapes nobody typed.
 pub fn title_of(transcript: &Path) -> String {
+    tail_facts(transcript).0
+}
+
+/// When the conversation last did anything, from the newest entry that carries a time.
+///
+/// The file's own timestamp answers a different question. An agent holds its transcript open and can
+/// touch it without adding an entry, which puts the file minutes old while the last thing said in it is
+/// a day old, and a row claiming a chat was used minutes ago is worse than one that says nothing.
+pub fn last_activity(transcript: &Path) -> Option<i64> {
+    tail_facts(transcript).1
+}
+
+/// `2026-09-15T08:02:46.880Z` as seconds since the epoch. Fixed-width and always UTC, so the fields are
+/// read by position and the day count comes from civil arithmetic rather than a calendar library.
+fn epoch_of(stamp: &str) -> Option<i64> {
+    let bytes = stamp.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let num = |a: usize, b: usize| stamp.get(a..b)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    // Days from 1970-01-01, by Howard Hinnant's civil-from-days in reverse: the year starts in March so
+    // a leap day lands at the end of it and needs no special case.
+    let shifted_year = if m <= 2 { y - 1 } else { y };
+    let era = if shifted_year >= 0 { shifted_year } else { shifted_year - 399 } / 400;
+    let year_of_era = shifted_year - era * 400;
+    let month_shift = if m > 2 { m - 3 } else { m + 9 };
+    let day_of_year = (153 * month_shift + 2) / 5 + d - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hh * 3_600 + mm * 60 + ss)
+}
+
+fn tail_facts(transcript: &Path) -> (String, Option<i64>) {
     let Ok(mut file) = File::open(transcript) else {
-        return String::new();
+        return (String::new(), None);
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(TAIL_WINDOW);
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
+        return (String::new(), None);
     }
     let mut buf = String::new();
     if file.read_to_string(&mut buf).is_err() {
@@ -206,15 +241,23 @@ pub fn title_of(transcript: &Path) -> String {
     }
 
     let mut fallback = String::new();
+    let mut title = String::new();
+    let mut used: Option<i64> = None;
     for line in buf.lines().rev() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if value.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
-            if let Some(title) = value.get("aiTitle").and_then(|t| t.as_str()) {
+        if used.is_none() {
+            used = value
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(epoch_of);
+        }
+        if title.is_empty() && value.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
+            if let Some(named) = value.get("aiTitle").and_then(|t| t.as_str()) {
                 // Flattened for the same reason the typed text is: a newline inside a name would end
                 // the row it is printed in and shift every column after it.
-                let flat = title.split_whitespace().collect::<Vec<_>>().join(" ");
+                let flat = named.split_whitespace().collect::<Vec<_>>().join(" ");
                 if !flat.is_empty() {
-                    return flat;
+                    title = flat;
                 }
             }
         }
@@ -223,8 +266,14 @@ pub fn title_of(transcript: &Path) -> String {
                 fallback = text;
             }
         }
+        // Both answers come from the newest entries, so there is nothing left to learn once each is
+        // filled and the whole window need not be parsed.
+        if !title.is_empty() && used.is_some() {
+            break;
+        }
     }
-    fallback
+    let name = if title.is_empty() { fallback } else { title };
+    (name, used)
 }
 
 /// What the person typed, flattened to one line. System reminders, command echoes and caveats are
@@ -308,7 +357,11 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
             Some(false) => published_idle = true,
             None => {}
         }
-        entry.last_used = entry.last_used.max(live.stamp);
+        // What the conversation itself last recorded, and the agent's own status time only when it
+        // recorded nothing: a status change is written for reasons a reader would not call use.
+        entry.last_used = entry
+            .last_used
+            .max(last_activity(&transcript).unwrap_or(live.stamp));
 
         // The row points at the session that was active most recently, since that is the one worth
         // joining when several hold the conversation.
@@ -339,7 +392,6 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
         }
 
         let worked = work_epoch(&transcript);
-        entry.last_used = entry.last_used.max(worked);
         // The write clock only decides for an agent that published nothing; overriding a published
         // `idle` would call a chat working because a file was touched.
         if entry.state != State::Running && !published_idle && now - worked <= crate::IDLE_AFTER {
@@ -382,7 +434,7 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
             pid: None,
             dir: dir_of(&transcript),
             title: title_of(&transcript),
-            last_used: mtime(&transcript),
+            last_used: last_activity(&transcript).unwrap_or_else(|| mtime(&transcript)),
         });
     }
     out
