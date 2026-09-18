@@ -157,6 +157,21 @@ impl Layout {
     }
 }
 
+/// The row under the pointer, drawn so it reads as the one Enter would take: the leading space becomes
+/// a caret and the line is reversed. Both the caret and the escape sequences are added after the row is
+/// composed, so neither moves a column or counts against the width.
+fn mark(line: &str, pointed: bool) -> String {
+    if !pointed {
+        return line.to_string();
+    }
+    let body = line.trim_end_matches('\n');
+    let pointed_body = match body.strip_prefix(' ') {
+        Some(rest) => format!("\u{203a}{rest}"),
+        None => body.to_string(),
+    };
+    format!("\x1b[7m{pointed_body}\x1b[0m\n")
+}
+
 /// One row of cells, padded to the layout it was given.
 fn compose(l: &Layout, number: &str, agent: &str, state: &str, age: &str, dir: &str, task: &str) -> String {
     let mut line = format!(" {number:<2} ");
@@ -352,6 +367,10 @@ fn pick(chats: &[Chat]) {
         return;
     }
     let mut start = 0usize;
+    // Where the pointer sits, counted over every row the list shows: the chats, then the rows that
+    // start a new one. Enter takes whatever it is on, so moving it is the whole of choosing.
+    let mut cursor = 0usize;
+    let total = chats.len() + agents.len();
     let mut notice = String::new();
     alt_screen(true);
     loop {
@@ -363,9 +382,14 @@ fn pick(chats: &[Chat]) {
         print!("{}", header(&l));
         let last = (start + size).min(chats.len());
         for i in start..last {
-            print!("{}", row(&l, &(i + 1).to_string(), &chats[i]));
+            print!("{}", mark(&row(&l, &(i + 1).to_string(), &chats[i]), i == cursor));
         }
-        print!("{}", new_rows(&l, &agents));
+        for (offset, drawn) in new_rows(&l, &agents).lines().enumerate() {
+            print!(
+                "{}",
+                mark(&format!("{drawn}\n"), chats.len() + offset == cursor)
+            );
+        }
         if chats.len() > size {
             println!(
                 "\nchats {}-{} of {}, page {}/{}",
@@ -379,10 +403,13 @@ fn pick(chats: &[Chat]) {
         print!("{}", fit("\n*  another terminal is looking at this chat right now\n", width));
         draw_notice(&mut notice, width);
 
-        let default = if chats.is_empty() {
-            agents.first().map(|a| letter(*a).to_string()).unwrap_or_default()
+        let default = if cursor < chats.len() {
+            (cursor + 1).to_string()
         } else {
-            (start + 1).to_string()
+            agents
+                .get(cursor - chats.len())
+                .map(|a| letter(*a).to_string())
+                .unwrap_or_default()
         };
         // Each key is named with what it does, since a bare `a` reads as the word rather than as a
         // key, and the default is stated as the keypress that takes it rather than as a bracketed
@@ -390,7 +417,8 @@ fn pick(chats: &[Chat]) {
         let paging = chats.len() > size;
         let mut parts: Vec<String> = Vec::new();
         if !chats.is_empty() {
-            parts.push(format!("type a number to open, enter opens {default}"));
+            parts.push("up and down move the pointer, enter opens it".to_string());
+            parts.push("or type a number".to_string());
         }
         parts.extend(
             agents
@@ -408,7 +436,8 @@ fn pick(chats: &[Chat]) {
         if prompt.chars().count() > width {
             let mut brief: Vec<String> = Vec::new();
             if !chats.is_empty() {
-                brief.push(format!("number opens, enter = {default}"));
+                brief.push("up/down move, enter opens".to_string());
+                brief.push("number opens".to_string());
             }
             brief.extend(agents.iter().map(|a| format!("{} = {}", letter(*a), a.as_str())));
             if paging {
@@ -422,7 +451,7 @@ fn pick(chats: &[Chat]) {
         if prompt.chars().count() > width {
             let mut keys: Vec<String> = Vec::new();
             if !chats.is_empty() {
-                keys.push("number".to_string());
+                keys.push("up/down, enter, number".to_string());
             }
             keys.extend(agents.iter().map(|a| letter(*a).to_string()));
             if paging {
@@ -445,6 +474,26 @@ fn pick(chats: &[Chat]) {
         };
         let reply = match choice {
             Choice::Resized => continue,
+            // The pointer stops at each end rather than wrapping: a list is read as a list, and landing
+            // on the far end after one keypress reads as having lost your place.
+            Choice::Up => {
+                cursor = cursor.saturating_sub(1);
+                // The page follows the pointer, since a pointer on a row the page does not show is a
+                // pointer nobody can see.
+                if cursor < start {
+                    start = start.saturating_sub(size);
+                }
+                continue;
+            }
+            Choice::Down => {
+                if cursor + 1 < total {
+                    cursor += 1;
+                }
+                if cursor < chats.len() && cursor >= start + size {
+                    start += size;
+                }
+                continue;
+            }
             Choice::Reply(reply) => reply,
         };
         let reply = if reply.is_empty() { default.clone() } else { reply };
@@ -453,6 +502,7 @@ fn pick(chats: &[Chat]) {
             "n" | "N" => {
                 if start + size < chats.len() {
                     start += size;
+                    cursor = start;
                 } else {
                     notice = "already on the last page".to_string();
                 }
@@ -461,6 +511,7 @@ fn pick(chats: &[Chat]) {
             "p" | "P" => {
                 if start >= size {
                     start -= size;
+                    cursor = start;
                 } else {
                     notice = "already on the first page".to_string();
                 }
@@ -490,17 +541,21 @@ fn pick(chats: &[Chat]) {
             Ok(n) if n >= 1 && n <= chats.len() => {
                 let chat = &chats[n - 1];
                 if let Action::Takeover { pid, .. } = chat.action() {
-                    // Ending an agent mid-turn drops whatever it is working on, so a working one is
-                    // confirmed rather than assumed.
+                    // This action ends a running process, whatever the row says that process is doing,
+                    // so it is always confirmed. `No tmux` is a live agent as much as `Running` is, and
+                    // both sit one keypress from a pointer that lands on them: an unasked kill costs
+                    // whatever that agent was holding.
                     if chat.state == agent_tmux::State::Running {
-                        println!("That chat is working right now, so ending it drops what it is mid-way through.");
-                        match read_text("enter ends it and reopens under tmux, esc cancels > ") {
-                            None => {
-                                println!("cancelled");
-                                return;
-                            }
-                            Some(_) => {}
+                        println!("That chat is working right now, and opening it here ends the agent mid-task.");
+                    } else {
+                        println!("That chat has a live agent outside tmux, and opening it here ends that agent.");
+                    }
+                    match read_text("enter ends it and reopens under tmux, esc cancels > ") {
+                        None => {
+                            println!("cancelled");
+                            return;
                         }
+                        Some(_) => {}
                     }
                     println!("ending pid {pid} so the conversation can reopen under tmux");
                 }
@@ -569,7 +624,7 @@ fn read_text(prompt: &str) -> Option<String> {
     while stdin.read(&mut byte).unwrap_or(0) > 0 {
         match byte[0] {
             0x1b => {
-                if escape_is_cancel(&mut stdin) {
+                if matches!(escape_key(&mut stdin), Pressed::Escape) {
                     println!();
                     drop(raw);
                     return None;
@@ -636,32 +691,49 @@ fn fit(text: &str, width: usize) -> String {
 enum Choice {
     Reply(String),
     Resized,
+    Up,
+    Down,
 }
 
-/// What an escape turned out to be: a cancel, or a sequence to ignore.
+/// What an escape turned out to be.
 ///
 /// Arrow keys, and any other key the terminal spells as a sequence, arrive as escape then a handful of
 /// bytes. Mouse reporting sends the same shape on every movement, and those carry digits: consuming a
 /// fixed two bytes leaves the rest of `\x1b[<35;42;13M` to be read as an answer, so moving the mouse
 /// types into the prompt and can choose a row. A sequence is therefore read to its end, which for CSI
-/// and SS3 is the first byte in the final range.
-fn escape_is_cancel(stdin: &mut io::Stdin) -> bool {
+/// and SS3 is the first byte in the final range, and the ones worth acting on are recognised by the
+/// byte that ends them.
+enum Pressed {
+    Escape,
+    Up,
+    Down,
+    Ignored,
+}
+
+fn escape_key(stdin: &mut io::Stdin) -> Pressed {
     let mut byte = [0u8; 1];
     if read_with_timeout(stdin, &mut byte) == 0 {
-        return true;
+        return Pressed::Escape;
     }
     match byte[0] {
+        // `[` for the usual arrows, `O` for the ones a terminal in application mode sends.
         b'[' | b'O' => {
             // Parameters and intermediates run 0x20..0x3f; the byte that ends the sequence is above.
+            let mut last = 0u8;
             while read_with_timeout(stdin, &mut byte) != 0 {
+                last = byte[0];
                 if !(0x20..=0x3f).contains(&byte[0]) {
                     break;
                 }
             }
+            match last {
+                b'A' => Pressed::Up,
+                b'B' => Pressed::Down,
+                _ => Pressed::Ignored,
+            }
         }
-        _ => {}
+        _ => Pressed::Ignored,
     }
-    false
 }
 
 /// Read one answer with escape as cancel.
@@ -705,10 +777,23 @@ fn read_choice(prompt: &str, drawn_width: usize) -> Option<Choice> {
         }
         match byte[0] {
             0x1b => {
-                if escape_is_cancel(&mut stdin) {
-                    println!();
-                    drop(raw);
-                    return None;
+                match escape_key(&mut stdin) {
+                    Pressed::Escape => {
+                        println!();
+                        drop(raw);
+                        return None;
+                    }
+                    // A move is answered straight away, since the row it lands on has to be drawn
+                    // before the next key means anything.
+                    Pressed::Up if typed.is_empty() => {
+                        drop(raw);
+                        return Some(Choice::Up);
+                    }
+                    Pressed::Down if typed.is_empty() => {
+                        drop(raw);
+                        return Some(Choice::Down);
+                    }
+                    _ => {}
                 }
             }
             // Raw mode hands these over as bytes rather than as signals, and a picker that ignores
