@@ -84,8 +84,8 @@ fn process_alive(pid: i32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
         || std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|out| out.status.success())
             .unwrap_or(false)
 }
 

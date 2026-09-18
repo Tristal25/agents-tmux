@@ -85,10 +85,13 @@ pub fn panes() -> Vec<Pane> {
 pub fn has_session(name: &str) -> bool {
     // The `=` prefix asks tmux for an exact match, so a name that merely prefixes another one does
     // not report the wrong session.
+    // The answer is the exit status, and a missing session is the expected half of it. `output`
+    // captures what tmux says about that, where `status` would let its complaint through to the screen
+    // the picker is drawing on.
     Command::new("tmux")
         .args(["has-session", "-t", &format!("={name}")])
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|out| out.status.success())
         .unwrap_or(false)
 }
 

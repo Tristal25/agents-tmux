@@ -191,9 +191,11 @@ fn end_agent(pid: i32) {
 }
 
 fn signal(target: &str, sig: &str) {
+    // A process that has already gone is the ordinary outcome here, so `kill` saying so is captured
+    // rather than printed over the list.
     let _ = Command::new("kill")
         .args([&format!("-{sig}"), target])
-        .status();
+        .output();
 }
 
 /// `/proc` answers on Linux; elsewhere the signal that asks without sending anything does.
@@ -208,8 +210,8 @@ fn alive(pid: i32) -> bool {
     }
     Command::new("kill")
         .args(["-0", &pid.to_string()])
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|out| out.status.success())
         .unwrap_or(false)
 }
 
