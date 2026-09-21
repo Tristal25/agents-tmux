@@ -338,14 +338,11 @@ fn alt_screen(on: bool) {
     if !io::stdin().is_terminal() {
         return;
     }
-    // A terminal goes on reporting mouse movement for as long as some program has asked it to, and the
-    // last full-screen one may have left that on. Those reports arrive as escape sequences on the same
-    // stdin a keypress does, so the picker turns them off for its own screen rather than reading them.
-    let seq = if on {
-        "\x1b[?1049h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l"
-    } else {
-        "\x1b[?1049l"
-    };
+    // Only the screen is switched. Mouse reporting is one terminal-wide setting shared by every program
+    // drawing on it, including the agents running in other tmux panes, and a mode this turns off stays
+    // off for them: an agent that asked for mouse reports keeps its request while the reports stop
+    // arriving. The reader consumes a report to its end instead, which needs nothing switched.
+    let seq = if on { "\x1b[?1049h" } else { "\x1b[?1049l" };
     print!("{seq}");
     let _ = io::stdout().flush();
 }
