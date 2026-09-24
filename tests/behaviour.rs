@@ -114,6 +114,25 @@ fn the_newest_name_a_chat_gave_itself_wins() {
     std::fs::remove_file(&path).ok();
 }
 
+/// A name the person set outranks the one the agent keeps rewriting for itself.
+#[test]
+fn a_renamed_chat_keeps_the_name_it_was_given() {
+    let dir = std::env::temp_dir().join("agent-tmux-rename-test");
+    std::fs::create_dir_all(dir.join("renamed")).unwrap();
+    let path = dir.join("renamed.jsonl");
+    let mut file = std::fs::File::create(&path).unwrap();
+    writeln!(file, r#"{{"type":"ai-title","aiTitle":"the name it gave itself"}}"#).unwrap();
+    drop(file);
+    std::fs::write(
+        dir.join("renamed").join("custom-title.json"),
+        r#"{"customTitle":"Accessibility task"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(agent_tmux::claude::title_of(&path), "Accessibility task");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Without a name of its own, the last thing typed stands in, and the injected shapes nobody typed
 /// stay out of it.
 #[test]
@@ -124,6 +143,9 @@ fn an_unnamed_chat_falls_back_to_what_was_typed() {
     let mut file = std::fs::File::create(&path).unwrap();
     writeln!(file, r#"{{"type":"user","message":{{"content":"what I asked for"}}}}"#).unwrap();
     writeln!(file, r#"{{"type":"user","message":{{"content":"<system-reminder>noise</system-reminder>"}}}}"#).unwrap();
+    // A loaded skill arrives as an injected entry, and its first line would otherwise name the chat
+    // after the skill's directory.
+    writeln!(file, r#"{{"type":"user","isMeta":true,"message":{{"content":[{{"type":"text","text":"Base directory for this skill: /home/me/.claude/skills/doc-writing"}}]}}}}"#).unwrap();
     drop(file);
 
     assert_eq!(agent_tmux::claude::title_of(&path), "what I asked for");

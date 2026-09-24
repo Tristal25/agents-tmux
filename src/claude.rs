@@ -179,14 +179,28 @@ fn work_epoch(transcript: &Path) -> i64 {
     newest
 }
 
-/// The task the agent named itself, taken from the last `ai-title` in the transcript.
+/// A name the person gave the chat, kept beside the transcript and outliving the agent. The
+/// transcript records nothing about a rename.
+fn custom_title(transcript: &Path) -> Option<String> {
+    let text = fs::read_to_string(transcript.with_extension("").join("custom-title.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    let flat = value
+        .get("customTitle")?
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!flat.is_empty()).then_some(flat)
+}
+
+/// A chat's name: the one the person set, else the task the agent named itself in the last `ai-title`.
 ///
-/// Claude rewrites that name as the work changes, so the newest one describes the chat best. Only
-/// the tail of the file is read: these transcripts reach tens of megabytes, and parsing all of it
-/// to reach its final lines costs far more than the answer is worth. Without a title, the last
-/// thing typed stands in, skipping the injected shapes nobody typed.
+/// A rename wins, since the agent rewrites its own name as the work changes and would undo a choice a
+/// person made. Only the tail of the file is read: these transcripts reach tens of megabytes, and
+/// parsing all of it to reach its final lines costs far more than the answer is worth. Without a
+/// title, the last thing typed stands in, skipping the injected shapes nobody typed.
 pub fn title_of(transcript: &Path) -> String {
-    tail_facts(transcript).0
+    custom_title(transcript).unwrap_or_else(|| tail_facts(transcript).0)
 }
 
 /// When the conversation last did anything, from the newest entry that carries a time.
@@ -279,6 +293,11 @@ fn tail_facts(transcript: &Path) -> (String, Option<i64>) {
 /// What the person typed, flattened to one line. System reminders, command echoes and caveats are
 /// injected rather than typed, so they never stand in for a title.
 fn user_text(value: &serde_json::Value) -> Option<String> {
+    // Every injected entry carries `isMeta`, and a loaded skill arrives as one whose first line names
+    // the skill's own directory.
+    if value.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+        return None;
+    }
     let content = value.get("message")?.get("content")?;
     let raw = match content {
         serde_json::Value::String(s) => s.clone(),
