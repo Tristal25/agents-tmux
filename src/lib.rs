@@ -13,8 +13,9 @@ pub mod tmux;
 pub use model::{Action, Agent, Chat, Scope, State};
 
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// Whether this process runs inside tmux. An empty value counts as outside, since a shell that
 /// exports the name without a value is not in a session.
@@ -51,6 +52,9 @@ pub fn open(action: &Action) -> std::io::Result<()> {
                 format!("{} is not installed on this machine", agent.as_str()),
             ));
         }
+        // An agent already running keeps the version it started with, so the moment a chat starts one
+        // is the only moment an update reaches it.
+        update_agent(agent);
     }
     // The list is a snapshot. A conversation with nothing holding it when the rows were drawn can
     // be live by the time one is chosen, and starting a second agent on it puts two of them on one
@@ -98,6 +102,38 @@ pub fn open(action: &Action) -> std::io::Result<()> {
             spawn(&name, resume_command(*agent, id), dir)
         }
     }
+}
+
+/// How long an update may run before the chat starts regardless. A hook waiting on a network that
+/// never answers would otherwise hold the chat for as long as that lasts.
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Bring an agent up to date through the machine's own installer: an executable at
+/// `${XDG_CONFIG_HOME:-~/.config}/agent-tmux/update`, run with the agent's name. Its result changes
+/// nothing here, since a chat on the version already installed beats no chat at all.
+fn update_agent(agent: Agent) {
+    let Some(hook) = update_hook() else { return };
+    let Ok(mut child) = Command::new(hook).arg(agent.as_str()).spawn() else {
+        return;
+    };
+    let deadline = Instant::now() + UPDATE_TIMEOUT;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            _ => return,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn update_hook() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| claude::home().join(".config"));
+    let hook = base.join("agent-tmux").join("update");
+    hook.is_file().then_some(hook)
 }
 
 /// A name given on the command line wins over the derived one, since tmux takes any name and the

@@ -115,6 +115,19 @@ A resize is picked up between keypresses, so narrowing the window and widening i
 
 **A session lives exactly as long as its chat.** tmux destroys a session when its command exits, so ending the agent removes the row. Detaching keeps it, which is the reason to run agents in tmux at all.
 
+**The name you give a chat wins.** An agent rewrites its own name as the work changes. A rename goes in a file of its own beside the transcript. So the list shows the name you set, and the agent's newest name where you set none. That file outlives the agent, so a chat you renamed keeps that name after it exits.
+
+**An agent is brought up to date before a chat starts it.** A running agent keeps the version it started with. The start is the one moment a new version reaches it. An executable at `$XDG_CONFIG_HOME/agent-tmux/update`, or `~/.config/agent-tmux/update`, runs first. It takes the agent's name as its argument, and prints to the terminal the chat is about to use. The chat starts once it returns, or after 90 seconds. This step runs only where that file exists, since installers differ per machine.
+
+```bash
+#!/bin/sh
+# ~/.config/agent-tmux/update
+case "$1" in
+    claude) npm install -g @anthropic-ai/claude-code ;;
+    codex) npm install -g @openai/codex ;;
+esac
+```
+
 ## Usage
 
 ```
