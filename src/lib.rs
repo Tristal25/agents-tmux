@@ -88,7 +88,15 @@ pub fn open(action: &Action) -> std::io::Result<()> {
         }
     }
     match action {
-        Action::Attach { session, server } => attach(session, server.as_deref()),
+        Action::Attach { session, server } => {
+            if server.is_none() && !tmux::has_session(session) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{session} runs on a tmux server this list cannot read, so open it from there"),
+                ));
+            }
+            attach(session, server.as_deref())
+        }
         Action::Resume { agent, id, dir } => {
             let name = tmux::free_name(agent.as_str(), dir);
             spawn(&name, resume_command(*agent, id), dir)

@@ -63,6 +63,10 @@ fn a_resume_beside_a_live_agent_outside_tmux_is_refused() {
     let _ = agent.wait();
     let _ = fs::remove_dir_all(&root);
 
+    // A session no readable server holds is refused before tmux is handed the terminal.
+    let away = open(&Action::Attach { session: "away".into(), server: None });
+    assert_eq!(away.expect_err("an unreadable session is refused").kind(), std::io::ErrorKind::NotFound);
+
     let err = result.expect_err("a resume beside a live agent is refused");
     assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     assert!(err.to_string().contains(&pid.to_string()), "{err}");

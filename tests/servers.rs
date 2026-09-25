@@ -50,6 +50,13 @@ fn a_chat_on_another_server_is_live_on_that_server() {
         scratch.sockets.push(socket.clone());
         tmux(socket, &["-f", "/dev/null", "new-session", "-d", "-s", "work", "sleep 120"]);
     }
+    // A third server sits outside the socket directory, so the list cannot read it.
+    let unseen = root.join("elsewhere").join("sock");
+    fs::create_dir_all(unseen.parent().unwrap()).unwrap();
+    scratch.sockets.push(unseen.clone());
+    tmux(&unseen, &["-f", "/dev/null", "new-session", "-d", "-s", "away", "sleep 120"]);
+    let away_pid = tmux(&unseen, &["display", "-p", "-t", "=away:", "#{pane_pid}"]);
+    let away_pane = tmux(&unseen, &["display", "-p", "-t", "=away:", "#{session_name}:#{window_id}.#{pane_id}"]);
     let pid = tmux(&other, &["display", "-p", "-t", "=work:", "#{pane_pid}"]);
     let pane = tmux(&other, &["display", "-p", "-t", "=work:", "#{session_name}:#{window_id}.#{pane_id}"]);
 
@@ -67,10 +74,21 @@ fn a_chat_on_another_server_is_live_on_that_server() {
         ),
     )
     .unwrap();
+    let away_id = "11111111-2222-3333-4444-666666666666";
+    fs::write(
+        home.join(format!(".claude/sessions/{away_pid}.json")),
+        format!(
+            r#"{{"pid":{away_pid},"sessionId":"{away_id}","cwd":"{}","tmux":"{away_pane}","status":"idle","statusUpdatedAt":1}}"#,
+            dir.display()
+        ),
+    )
+    .unwrap();
     let key = dir.to_string_lossy().replace('/', "-");
     let project = home.join(".claude/projects").join(key);
     fs::create_dir_all(&project).unwrap();
-    fs::write(project.join(format!("{id}.jsonl")), "{\"type\":\"mode\",\"mode\":\"normal\"}\n").unwrap();
+    for conversation in [id, away_id] {
+        fs::write(project.join(format!("{conversation}.jsonl")), "{\"type\":\"mode\",\"mode\":\"normal\"}\n").unwrap();
+    }
 
     std::env::set_var("TMUX_TMPDIR", &root);
     std::env::set_var("HOME", &home);
@@ -98,5 +116,15 @@ fn a_chat_on_another_server_is_live_on_that_server() {
     assert_eq!(chat.state, State::Idle, "a chat on another server is live, not outside tmux");
     assert_eq!(chat.session.as_deref(), Some("work"));
     assert_eq!(chat.server.as_deref(), Some(other.as_path()), "the pane reference picks the server");
+
+    // An agent that recorded a pane is inside tmux even when no readable server holds it, so its
+    // row joins and never ends the agent.
+    let away = chats.iter().find(|c| c.id == away_id).expect("the unseen server's chat is listed");
+    assert_eq!(away.state, State::Idle, "a recorded pane means inside tmux");
+    assert!(
+        matches!(away.action(), agent_tmux::Action::Attach { .. }),
+        "opening it tries to join, never to take over: {:?}",
+        away.action()
+    );
     drop(scratch);
 }

@@ -444,6 +444,13 @@ pub fn chats(
                 entry.pid = Some(live.pid);
                 entry.attached = at.attached;
             }
+        } else if entry.session.is_none() && live.pane.is_some() {
+            // The agent recorded a pane, so it runs inside tmux, on a server this list cannot read:
+            // one outside the socket directory, or one whose tmux speaks another protocol. Ending
+            // it would take a live chat from whatever holds that server, so the row keeps the
+            // session's name and opening it only tries to join.
+            entry.session = live.session.clone();
+            entry.pid = Some(live.pid);
         }
 
         let worked = work_epoch(&transcript);
