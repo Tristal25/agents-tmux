@@ -549,6 +549,8 @@ fn pick(chats: &[Chat]) {
                     }
                     match read_text("enter ends it and reopens under tmux, esc cancels > ") {
                         None => {
+                            // The shell gets its own screen back, so the word lands where it is seen.
+                            alt_screen(false);
                             println!("cancelled");
                             return;
                         }
@@ -562,7 +564,8 @@ fn pick(chats: &[Chat]) {
                 act(&chat.action());
                 return;
             }
-            _ => println!("Out of range: {reply}\n"),
+            // The next pass clears the screen, so the message rides the one-shot notice instead.
+            _ => notice = format!("out of range: {reply}"),
         }
     }
 }
