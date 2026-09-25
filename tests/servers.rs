@@ -76,6 +76,12 @@ fn a_chat_on_another_server_is_live_on_that_server() {
     std::env::set_var("HOME", &home);
     // Outside tmux, so the list comes from the socket directory alone.
     std::env::remove_var("TMUX");
+    // Under a C locale a tmux client prints a format's tab as `_`, so the reads must not depend
+    // on the locale they run in.
+    std::env::set_var("LC_ALL", "C");
+    for var in ["LANG", "LC_CTYPE", "LANGUAGE"] {
+        std::env::remove_var(var);
+    }
 
     let sessions = agent_tmux::tmux::sessions();
     assert_eq!(sessions.named("work").len(), 2, "both servers are read");

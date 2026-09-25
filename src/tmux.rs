@@ -54,7 +54,9 @@ impl Sessions {
 const SEP: char = '\t';
 
 fn run_on(server: &Path, args: &[&str]) -> io::Result<String> {
-    let out = Command::new("tmux").arg("-S").arg(server).args(args).output()?;
+    // A client with no UTF-8 locale prints a tab in a format as `_`, which fuses every field this
+    // module splits. `-u` makes tmux treat the client as UTF-8 whatever the locale says.
+    let out = Command::new("tmux").arg("-u").arg("-S").arg(server).args(args).output()?;
     // No server behind a socket is the ordinary case for a server that has exited, so it reads as
     // an empty list.
     if !out.status.success() {
@@ -201,7 +203,9 @@ pub fn pane_path(server: Option<&Path>, session: &str) -> Option<String> {
     // `display` takes a pane, and `=name` alone resolves no pane there: tmux prints an empty
     // format and still succeeds. The trailing colon names the session's current window and pane.
     let args = ["display", "-pt", &format!("={session}:"), "#{pane_current_path}"];
+    // `-u` keeps a path's characters intact under a C locale, as for the list reads.
     let mut cmd = Command::new("tmux");
+    cmd.arg("-u");
     if let Some(server) = server {
         cmd.arg("-S").arg(server);
     }
