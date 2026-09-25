@@ -81,6 +81,11 @@ fn a_chat_on_another_server_is_live_on_that_server() {
     assert_eq!(sessions.named("work").len(), 2, "both servers are read");
     assert!(agent_tmux::tmux::is_default(&default));
     assert!(!agent_tmux::tmux::is_default(&other));
+    assert_eq!(
+        agent_tmux::tmux::pane_path(Some(&other), "work").as_deref(),
+        Some(std::env::current_dir().unwrap().to_str().unwrap()),
+        "the directory of a session's pane is read on its server"
+    );
 
     let chats = list(&Scope::Everywhere);
     let chat = chats.iter().find(|c| c.id == id).expect("the registry's chat is listed");

@@ -198,7 +198,9 @@ pub fn has_session(name: &str) -> bool {
 /// The working directory of a session's active pane, on the given server, or on the one a bare
 /// `tmux` reaches when none is given.
 pub fn pane_path(server: Option<&Path>, session: &str) -> Option<String> {
-    let args = ["display", "-pt", &format!("={session}"), "#{pane_current_path}"];
+    // `display` takes a pane, and `=name` alone resolves no pane there: tmux prints an empty
+    // format and still succeeds. The trailing colon names the session's current window and pane.
+    let args = ["display", "-pt", &format!("={session}:"), "#{pane_current_path}"];
     let mut cmd = Command::new("tmux");
     if let Some(server) = server {
         cmd.arg("-S").arg(server);
