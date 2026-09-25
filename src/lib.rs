@@ -6,6 +6,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod hidden;
 pub mod model;
 pub mod term;
 pub mod tmux;
@@ -31,8 +32,9 @@ pub const IDLE_AFTER: i64 = 30;
 pub fn list(scope: &Scope) -> Vec<Chat> {
     let sessions = tmux::sessions();
     let panes = tmux::panes();
-    let mut out = claude::chats(scope, &sessions, &panes);
-    out.extend(codex::chats(scope, &sessions, &panes));
+    let hidden = hidden::ids();
+    let mut out = claude::chats(scope, &sessions, &panes, &hidden);
+    out.extend(codex::chats(scope, &sessions, &panes, &hidden));
     out.sort_by(|a, b| b.last_used.cmp(&a.last_used));
     out
 }
@@ -167,7 +169,7 @@ fn session_name(agent: Agent, dir: &Path) -> String {
 /// session holding a conversation nobody asked for under a name that says otherwise.
 /// A conversation id reaches this from a file name, and it is placed inside a single-quoted shell
 /// string, so anything outside the alphabet ids use is refused rather than escaped.
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 

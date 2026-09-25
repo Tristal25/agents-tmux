@@ -374,7 +374,13 @@ fn dir_of(transcript: &Path) -> PathBuf {
 
 /// Every Claude chat, live or saved. One row per conversation: several tmux sessions can hold the
 /// same one, and a row each would bury every other chat under repeats of one.
-pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> Vec<Chat> {
+/// A hidden conversation is skipped before it counts against the cap on rows.
+pub fn chats(
+    scope: &Scope,
+    sessions: &tmux::Sessions,
+    panes: &[tmux::Pane],
+    hidden: &HashSet<String>,
+) -> Vec<Chat> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -384,6 +390,9 @@ pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> 
     // Keyed by conversation, since one chat publishing `idle` says nothing about another.
     let mut published_idle: HashSet<String> = HashSet::new();
     for live in live_agents() {
+        if hidden.contains(&live.id) {
+            continue;
+        }
         if let Scope::Dir(want) = scope {
             if &live.dir != want {
                 continue;
@@ -470,7 +479,7 @@ pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> 
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if live_ids.contains(&id) || !interactive_chat(&transcript) {
+        if live_ids.contains(&id) || hidden.contains(&id) || !interactive_chat(&transcript) {
             continue;
         }
         out.push(Chat {

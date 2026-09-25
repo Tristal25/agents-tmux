@@ -93,7 +93,12 @@ fn first_cwd(path: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> Vec<Chat> {
+pub fn chats(
+    scope: &Scope,
+    sessions: &tmux::Sessions,
+    panes: &[tmux::Pane],
+    hidden: &std::collections::HashSet<String>,
+) -> Vec<Chat> {
     let held = holders(panes);
     let mut files = Vec::new();
     rollouts(&codex_home(), 4, &mut files);
@@ -102,6 +107,9 @@ pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> 
         .into_iter()
         .filter_map(|path| {
             let id = path.file_stem()?.to_string_lossy().into_owned();
+            if hidden.contains(&id) {
+                return None;
+            }
             let dir = first_cwd(&path).unwrap_or_else(|| crate::claude::home());
             if let Scope::Dir(want) = scope {
                 if &dir != want {

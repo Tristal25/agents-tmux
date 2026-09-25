@@ -88,6 +88,8 @@ It runs on Linux and macOS. Two places where the systems disagree are handled ra
 
 **One conversation, one row, one terminal.** Two agents resumed on one conversation both append to its transcript, so a chat already running is never given a second one: choosing it moves you to the session that holds it. Opening a chat detaches whichever terminal held it, since two terminals on one session share a single view sized to the smaller window. `--share` opts into that sharing.
 
+**A program that starts chats can keep them out of the list.** An agent that fans work out to other chats gives each one an id with `claude --session-id`, then runs `agent-tmux hide <id>` before it starts the chat. The list then keeps to the chats a person uses. A hidden chat is skipped before the row cap counts it, so it never pushes a visible one off the list.
+
 **Every tmux server, not only the default one.** A program that needs server-wide tmux options runs a server of its own, on its own socket. The list reads every server in tmux's socket directory, and a chat opens on the server that holds it. A session on another server belongs to the program that runs that server, so joining it shares the view rather than detaching that program.
 
 **Every directory, listed from anywhere.** A conversation belongs to the directory it was started in, so the list spans them all and the row carries that directory. Choosing a row creates its session there, so a chat about one project never opens in another. `--here` narrows the list to the current directory.
@@ -138,9 +140,11 @@ agent-tmux --new                start a fresh chat here straight away
 agent-tmux --new --agent codex  the same, running Codex
 agent-tmux --here               narrow the list to the current directory
 agent-tmux ls                   the same list, without the prompt
-agent-tmux <name>               open that tmux session, or create it on the newest conversation
-agent-tmux <name> <id>          create it resuming that conversation id
+agent-tmux hide <id>...         leave these conversations out of the list
+agent-tmux unhide <id>...       list them again
 ```
+
+In the list, `d` removes the chat under the pointer. One line asks first, and says so when the chat's agent is still running, since removing only hides the row.
 
 Flags work in any position: `-n/--new`, `--here`, `--agent claude|codex`, `--pick` (hand off to the agent's own picker), `--name <name>`, `--share`. `Esc` cancels any prompt.
 
@@ -244,6 +248,7 @@ What it gives up is cmux's own agent lifecycle, which is accepted only from insi
 | `<id>/subagents/*.jsonl` | work a dispatched subagent is doing |
 | `tmux list-sessions`, `list-panes`, on every socket in tmux's socket directory | which server and session hold each chat, and whether a terminal is attached |
 | `~/.codex` rollouts | Codex conversations, listed where they exist |
+| `${XDG_STATE_HOME:-~/.local/state}/agent-tmux/hidden` | conversation ids to leave out, one per line, with `#` starting a comment |
 
 A registry entry outlives its process, so every pid is checked before its row is trusted.
 

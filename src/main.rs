@@ -36,6 +36,24 @@ fn main() {
                 return;
             }
             "ls" | "list" => mode = Mode::List,
+            // The ids a command takes are the rest of the line.
+            verb @ ("hide" | "unhide") => {
+                let ids: Vec<String> = it.by_ref().cloned().collect();
+                if ids.is_empty() {
+                    eprintln!("{verb} takes one or more conversation ids");
+                    std::process::exit(2);
+                }
+                let done = if verb == "hide" {
+                    agent_tmux::hidden::hide(&ids)
+                } else {
+                    agent_tmux::hidden::unhide(&ids)
+                };
+                if let Err(err) = done {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             "pick" | "select" => mode = Mode::Pick,
             "--here" | "--cwd" => scope = Scope::Dir(cwd()),
             "-a" | "--all" => scope = Scope::Everywhere,
@@ -80,7 +98,7 @@ fn main() {
     let chats = list(&scope);
     match mode {
         Mode::List => print_all(&chats, &scope),
-        Mode::Pick => pick(&chats),
+        Mode::Pick => pick(chats),
     }
 }
 
@@ -356,7 +374,7 @@ fn draw_notice(notice: &mut String, width: usize) {
     }
 }
 
-fn pick(chats: &[Chat]) {
+fn pick(mut chats: Vec<Chat>) {
     let size = page_size();
     let agents = offered();
     if chats.is_empty() && agents.is_empty() {
@@ -367,10 +385,11 @@ fn pick(chats: &[Chat]) {
     // Where the pointer sits, counted over every row the list shows: the chats, then the rows that
     // start a new one. Enter takes whatever it is on, so moving it is the whole of choosing.
     let mut cursor = 0usize;
-    let total = chats.len() + agents.len();
     let mut notice = String::new();
     alt_screen(true);
     loop {
+        // Removing a chat shortens the list, so the count is taken on every pass.
+        let total = chats.len() + agents.len();
         let width = terminal_width();
         let l = Layout::for_width(width);
         if io::stdin().is_terminal() {
@@ -416,6 +435,7 @@ fn pick(chats: &[Chat]) {
         if !chats.is_empty() {
             parts.push("up and down move the pointer, enter opens it".to_string());
             parts.push("or type a number".to_string());
+            parts.push("d removes it from the list".to_string());
         }
         parts.extend(
             agents
@@ -435,6 +455,7 @@ fn pick(chats: &[Chat]) {
             if !chats.is_empty() {
                 brief.push("up/down move, enter opens".to_string());
                 brief.push("number opens".to_string());
+                brief.push("d = remove".to_string());
             }
             brief.extend(agents.iter().map(|a| format!("{} = {}", letter(*a), a.as_str())));
             if paging {
@@ -448,7 +469,7 @@ fn pick(chats: &[Chat]) {
         if prompt.chars().count() > width {
             let mut keys: Vec<String> = Vec::new();
             if !chats.is_empty() {
-                keys.push("up/down, enter, number".to_string());
+                keys.push("up/down, enter, number, d".to_string());
             }
             keys.extend(agents.iter().map(|a| letter(*a).to_string()));
             if paging {
@@ -511,6 +532,45 @@ fn pick(chats: &[Chat]) {
                     cursor = start;
                 } else {
                     notice = "already on the first page".to_string();
+                }
+                continue;
+            }
+            "d" | "D" => {
+                if cursor >= chats.len() {
+                    notice = "d removes a chat, and the pointer is on a new-chat row".to_string();
+                    continue;
+                }
+                let chat = &chats[cursor];
+                let title = if chat.title.is_empty() { "(no title yet)" } else { chat.title.as_str() };
+                // Removing only hides the row. A live agent keeps running, so the line says so
+                // before anything happens.
+                let live = if chat.state == agent_tmux::State::Exited {
+                    ""
+                } else {
+                    " Its agent keeps running."
+                };
+                let question = format!(
+                    "Remove \"{title}\" from the list?{live} enter removes it, esc keeps it > "
+                );
+                if read_text(&fit(&question, width)).is_none() {
+                    notice = "kept".to_string();
+                    continue;
+                }
+                let id = chat.id.clone();
+                let title = title.to_string();
+                match agent_tmux::hidden::hide(&[id.clone()]) {
+                    Ok(()) => {
+                        chats.remove(cursor);
+                        let total = chats.len() + agents.len();
+                        cursor = cursor.min(total.saturating_sub(1));
+                        while start > 0 && start >= chats.len() {
+                            start = start.saturating_sub(size);
+                        }
+                        notice = format!(
+                            "removed \"{title}\" from the list. agent-tmux unhide {id} brings it back"
+                        );
+                    }
+                    Err(err) => notice = format!("could not remove it: {err}"),
                 }
                 continue;
             }
@@ -817,7 +877,7 @@ fn read_choice(prompt: &str, drawn_width: usize) -> Option<Choice> {
                 print!("{}", c as char);
                 let _ = io::stdout().flush();
             }
-            c @ (b'n' | b'N' | b'p' | b'P' | b'a' | b'A' | b'b' | b'B') => {
+            c @ (b'n' | b'N' | b'p' | b'P' | b'a' | b'A' | b'b' | b'B' | b'd' | b'D') => {
                 if typed.is_empty() {
                     println!("{}", c as char);
                     drop(raw);
@@ -907,11 +967,17 @@ Usage:
   agent-tmux --new --agent codex  the same, running Codex
   agent-tmux --here               narrow the list to the current directory
   agent-tmux ls                   the same list, without the prompt
+  agent-tmux hide <id>...         leave these conversations out of the list
+  agent-tmux unhide <id>...       list them again
 
 States: Running (a turn or command in flight), Idle (alive, waiting on you), Open (a Codex
 conversation a session holds, which is as far as Codex state goes), No tmux (alive but outside tmux,
 so choosing it ends that agent and reopens the conversation in a session), Exited (the conversation
 is saved with no agent left). A `*` marks a chat another terminal is looking at right now.
+
+A program that starts chats for its own work picks each chat's id with `claude --session-id` and
+hides it, so the list keeps to the chats you use. The hidden ids live one per line in
+${XDG_STATE_HOME:-~/.local/state}/agent-tmux/hidden.
 
 Choosing a row moves you into that conversation's own directory. tmux session names are derived
 from the directory and never asked for.
