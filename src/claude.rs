@@ -3,7 +3,7 @@
 use crate::model::{Agent, Chat, Scope, State};
 use crate::tmux;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -381,7 +381,8 @@ pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> 
         .unwrap_or(0);
 
     let mut by_id: HashMap<String, Chat> = HashMap::new();
-    let mut published_idle = false;
+    // Keyed by conversation, since one chat publishing `idle` says nothing about another.
+    let mut published_idle: HashSet<String> = HashSet::new();
     for live in live_agents() {
         if let Scope::Dir(want) = scope {
             if &live.dir != want {
@@ -407,7 +408,9 @@ pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> 
         // masked by an idle sibling.
         match live.working {
             Some(true) => entry.state = State::Running,
-            Some(false) => published_idle = true,
+            Some(false) => {
+                published_idle.insert(live.id.clone());
+            }
             None => {}
         }
         // What the conversation itself last recorded, and the agent's own status time only when it
@@ -437,7 +440,10 @@ pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> 
         let worked = work_epoch(&transcript);
         // The write clock only decides for an agent that published nothing; overriding a published
         // `idle` would call a chat working because a file was touched.
-        if entry.state != State::Running && !published_idle && now - worked <= crate::IDLE_AFTER {
+        if entry.state != State::Running
+            && !published_idle.contains(&live.id)
+            && now - worked <= crate::IDLE_AFTER
+        {
             entry.state = State::Running;
         }
     }
