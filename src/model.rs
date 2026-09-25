@@ -158,13 +158,15 @@ impl Chat {
             },
             // A live process with no session to join is taken over whatever the row says, so a
             // state that outran its session can never start a second agent on the conversation.
-            _ if self.pid.is_some() && self.session.is_none() => Action::Takeover {
+            _ if self.pid.is_some_and(|p| p > 1) && self.session.is_none() => Action::Takeover {
                 pid: self.pid.unwrap_or(0),
                 agent: self.agent,
                 id: self.id.clone(),
                 dir: self.dir.clone(),
             },
-            (State::NoTmux, _) => Action::Takeover {
+            // A takeover needs the process to end. A row built without one has nothing to end, and
+            // a pid of 0 would signal the caller's own process group.
+            (State::NoTmux, _) if self.pid.is_some_and(|p| p > 1) => Action::Takeover {
                 pid: self.pid.unwrap_or(0),
                 agent: self.agent,
                 id: self.id.clone(),

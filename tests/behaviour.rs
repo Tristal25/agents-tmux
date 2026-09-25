@@ -234,3 +234,21 @@ fn a_chat_is_dated_by_its_own_last_entry() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_row_with_no_process_to_end_is_never_a_takeover() {
+    // `kill` reads 0 as the caller's own process group, so a row built without a real pid resumes.
+    for pid in [None, Some(0), Some(1)] {
+        let mut c = chat(State::NoTmux, None);
+        c.pid = pid;
+        assert_eq!(
+            c.action(),
+            Action::Resume {
+                agent: Agent::Claude,
+                id: c.id.clone(),
+                dir: PathBuf::from("/tmp"),
+            },
+            "pid {pid:?}"
+        );
+    }
+}

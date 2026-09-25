@@ -241,6 +241,11 @@ fn spawn(session: &str, command: String, dir: &Path) -> std::io::Result<()> {
 
 /// Ask an agent to finish, and insist if it does not.
 fn end_agent(pid: i32) {
+    // `kill` reads 0 and negative numbers as process groups, and 1 is init, so none of them names
+    // an agent.
+    if pid <= 1 {
+        return;
+    }
     // Closing a terminal ends the whole foreground group, which the agent handles cleanly, so the
     // group is the right target when the agent leads it. A group it merely belongs to can be the
     // login shell's, taking the shell and every sibling job with it, and an unreadable `ps` looks
