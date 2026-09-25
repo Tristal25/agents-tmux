@@ -189,7 +189,9 @@ fn attach(session: &str, server: Option<&Path>) -> std::io::Result<()> {
         term::announce_dir(Path::new(&dir));
     }
     let target = format!("={session}");
-    let share = server.is_some_and(|s| !tmux::is_default(s));
+    // `--share` asks for the shared view everywhere, and it is the rule on another program's server.
+    let share = std::env::var_os("AGENT_TMUX_SHARE").is_some_and(|v| !v.is_empty())
+        || server.is_some_and(|s| !tmux::is_default(s));
     let mut cmd = Command::new("tmux");
     if in_tmux() {
         let here = tmux::current_server();
