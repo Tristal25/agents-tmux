@@ -14,6 +14,7 @@ fn chat(state: State, session: Option<&str>) -> Chat {
         id: "11111111-2222-3333-4444-555555555555".into(),
         state,
         session: session.map(str::to_string),
+        server: session.map(|_| PathBuf::from("/tmp/tmux-1000/default")),
         attached: 0,
         held: 1,
         pid: Some(4242),
@@ -29,11 +30,56 @@ fn a_live_chat_is_joined_rather_than_started_again() {
         assert_eq!(
             chat(state, Some("work")).action(),
             Action::Attach {
-                session: "work".into()
+                session: "work".into(),
+                server: Some(PathBuf::from("/tmp/tmux-1000/default")),
             },
             "{state:?} holds a session, so it attaches"
         );
     }
+}
+
+#[test]
+fn a_chat_is_joined_on_the_server_that_holds_it() {
+    let mut c = chat(State::Idle, Some("work"));
+    c.server = Some(PathBuf::from("/tmp/tmux-1000/other"));
+    assert_eq!(
+        c.action(),
+        Action::Attach {
+            session: "work".into(),
+            server: Some(PathBuf::from("/tmp/tmux-1000/other")),
+        }
+    );
+}
+
+#[test]
+fn the_socket_is_read_from_the_tmux_variable() {
+    use agent_tmux::tmux::server_in;
+    assert_eq!(
+        server_in("/tmp/tmux-1000/default,4242,0"),
+        Some(PathBuf::from("/tmp/tmux-1000/default"))
+    );
+    // A socket path holding a comma keeps it, since tmux appends exactly two fields.
+    assert_eq!(
+        server_in("/tmp/a,b/sock,4242,3"),
+        Some(PathBuf::from("/tmp/a,b/sock"))
+    );
+    assert_eq!(server_in(""), None);
+    assert_eq!(server_in("4242,0"), None);
+}
+
+#[test]
+fn a_session_name_is_unique_only_per_server() {
+    use agent_tmux::tmux::{Session, Sessions};
+    let on = |server: &str, activity| Session {
+        name: "work".into(),
+        server: PathBuf::from(server),
+        activity,
+        attached: 0,
+    };
+    let all = Sessions(vec![on("/s/default", 1), on("/s/other", 2)]);
+    assert_eq!(all.get(std::path::Path::new("/s/other"), "work").map(|s| s.activity), Some(2));
+    assert_eq!(all.get(std::path::Path::new("/s/none"), "work").map(|s| s.activity), None);
+    assert_eq!(all.named("work").len(), 2);
 }
 
 #[test]

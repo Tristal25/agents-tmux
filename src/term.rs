@@ -29,7 +29,8 @@ fn parent_of(pid: i32) -> Option<i32> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-fn tty_of(pid: i32) -> Option<String> {
+/// The controlling terminal of a process, as its `/dev` path.
+pub fn tty_of(pid: i32) -> Option<String> {
     let out = Command::new("ps")
         .args(["-o", "tty=", "-p", &pid.to_string()])
         .output()

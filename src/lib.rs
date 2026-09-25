@@ -31,7 +31,7 @@ pub const IDLE_AFTER: i64 = 30;
 pub fn list(scope: &Scope) -> Vec<Chat> {
     let sessions = tmux::sessions();
     let panes = tmux::panes();
-    let mut out = claude::chats(scope, &sessions);
+    let mut out = claude::chats(scope, &sessions, &panes);
     out.extend(codex::chats(scope, &sessions, &panes));
     out.sort_by(|a, b| b.last_used.cmp(&a.last_used));
     out
@@ -66,12 +66,12 @@ pub fn open(action: &Action) -> std::io::Result<()> {
                 format!("conversation id holds characters it should not: {id}"),
             ));
         }
-        if let Some(session) = claude::live_session_for(id) {
-            return attach(&session);
+        if let Some((server, session)) = claude::live_session_for(id) {
+            return attach(&session, Some(&server));
         }
     }
     match action {
-        Action::Attach { session } => attach(session),
+        Action::Attach { session, server } => attach(session, server.as_deref()),
         Action::Resume { agent, id, dir } => {
             let name = tmux::free_name(agent.as_str(), dir);
             spawn(&name, resume_command(*agent, id), dir)
@@ -163,19 +163,52 @@ fn resume_command(agent: Agent, id: &str) -> String {
 }
 
 /// A chat belongs to one terminal at a time: two on one session share a single view sized to the
-/// smaller of them. So the session moves to the terminal asking for it.
-fn attach(session: &str) -> std::io::Result<()> {
-    if let Some(dir) = tmux::pane_path(session) {
+/// smaller of them. So a session on the user's default server moves to the terminal asking for it.
+/// A session on another server belongs to the program that runs that server, so joining it shares
+/// the view rather than detaching that program's own client.
+fn attach(session: &str, server: Option<&Path>) -> std::io::Result<()> {
+    if let Some(dir) = tmux::pane_path(server, session) {
         term::announce_dir(Path::new(&dir));
     }
-    // Inside tmux, switching moves the client already in use; attaching there would stack a tmux
-    // inside a tmux, with two status bars and a doubled prefix key.
-    let args: Vec<String> = if in_tmux() {
-        vec!["switch-client".into(), "-t".into(), format!("={session}")]
+    let target = format!("={session}");
+    let share = server.is_some_and(|s| !tmux::is_default(s));
+    let mut cmd = Command::new("tmux");
+    if in_tmux() {
+        let here = tmux::current_server();
+        match server {
+            // A client cannot switch to a session on another server, so it leaves its own server
+            // and an attach to that one runs in its place.
+            Some(there) if !here.as_deref().is_some_and(|h| tmux::same_socket(h, there)) => {
+                let detach = if share { "" } else { " -d" };
+                let join = format!(
+                    "exec tmux -S {} attach{detach} -t {}",
+                    shell_quote(&there.to_string_lossy()),
+                    shell_quote(&target)
+                );
+                cmd.args(["detach-client", "-E", &join]);
+            }
+            // Inside tmux, switching moves the client already in use; attaching there would stack a
+            // tmux inside a tmux, with two status bars and a doubled prefix key.
+            _ => {
+                cmd.args(["switch-client", "-t", &target]);
+            }
+        }
     } else {
-        vec!["attach".into(), "-dt".into(), format!("={session}")]
-    };
-    Err(Command::new("tmux").args(args).exec())
+        if let Some(there) = server {
+            cmd.arg("-S").arg(there);
+        }
+        cmd.arg("attach");
+        if !share {
+            cmd.arg("-d");
+        }
+        cmd.args(["-t", &target]);
+    }
+    Err(cmd.exec())
+}
+
+/// One argument for `sh -c`, whatever it holds.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 fn spawn(session: &str, command: String, dir: &Path) -> std::io::Result<()> {
@@ -186,7 +219,7 @@ fn spawn(session: &str, command: String, dir: &Path) -> std::io::Result<()> {
         ));
     }
     if tmux::has_session(session) {
-        return attach(session);
+        return attach(session, None);
     }
     term::announce_dir(dir);
     let dir = dir.to_string_lossy().into_owned();

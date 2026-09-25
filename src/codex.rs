@@ -15,20 +15,11 @@ fn codex_home() -> PathBuf {
         .unwrap_or_else(|| crate::claude::home().join(".codex"))
 }
 
-/// Which tmux session holds a Codex conversation, keyed by rollout id where the session names it
-/// and by directory otherwise.
+/// Which tmux session holds a Codex conversation, as its server's socket and its name, keyed by
+/// rollout id where the session names it and by directory otherwise.
 struct Holders {
-    by_id: HashMap<String, String>,
-    by_dir: HashMap<String, String>,
-}
-
-fn tty_of(pid: i32) -> Option<String> {
-    let out = Command::new("ps")
-        .args(["-o", "tty=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!tty.is_empty() && tty != "?").then(|| format!("/dev/{tty}"))
+    by_id: HashMap<String, (PathBuf, String)>,
+    by_dir: HashMap<String, (PathBuf, String)>,
 }
 
 fn codex_pids() -> Vec<i32> {
@@ -55,12 +46,12 @@ fn holders(panes: &[tmux::Pane]) -> Holders {
         by_dir: HashMap::new(),
     };
     for pid in codex_pids() {
-        let Some(tty) = tty_of(pid) else { continue };
+        let Some(tty) = crate::term::tty_of(pid) else { continue };
         let Some(pane) = by_tty.get(tty.as_str()) else { continue };
         if let Some(id) = id_in(&pane.start_command) {
-            out.by_id.insert(id, pane.session.clone());
+            out.by_id.insert(id, (pane.server.clone(), pane.session.clone()));
         }
-        out.by_dir.insert(pane.path.clone(), pane.session.clone());
+        out.by_dir.insert(pane.path.clone(), (pane.server.clone(), pane.session.clone()));
     }
     out
 }
@@ -102,7 +93,7 @@ fn first_cwd(path: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>, panes: &[tmux::Pane]) -> Vec<Chat> {
+pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> Vec<Chat> {
     let held = holders(panes);
     let mut files = Vec::new();
     rollouts(&codex_home(), 4, &mut files);
@@ -124,7 +115,7 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>, panes: &[
                 .cloned();
             let attached = session
                 .as_ref()
-                .and_then(|s| sessions.get(s))
+                .and_then(|(server, name)| sessions.get(server, name))
                 .map(|s| s.attached)
                 .unwrap_or(0);
             let last_used = fs::metadata(&path)
@@ -140,7 +131,8 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>, panes: &[
                     .unwrap_or_else(|| id.clone()),
                 state: if session.is_some() { State::Open } else { State::Exited },
                 id,
-                session,
+                server: session.as_ref().map(|(server, _)| server.clone()),
+                session: session.map(|(_, name)| name),
                 attached,
                 held: 1,
                 pid: None,

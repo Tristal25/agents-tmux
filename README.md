@@ -88,6 +88,8 @@ It runs on Linux and macOS. Two places where the systems disagree are handled ra
 
 **One conversation, one row, one terminal.** Two agents resumed on one conversation both append to its transcript, so a chat already running is never given a second one: choosing it moves you to the session that holds it. Opening a chat detaches whichever terminal held it, since two terminals on one session share a single view sized to the smaller window. `--share` opts into that sharing.
 
+**Every tmux server, not only the default one.** A program that needs server-wide tmux options runs a server of its own, on its own socket. The list reads every server in tmux's socket directory, and a chat opens on the server that holds it. A session on another server belongs to the program that runs that server, so joining it shares the view rather than detaching that program.
+
 **Every directory, listed from anywhere.** A conversation belongs to the directory it was started in, so the list spans them all and the row carries that directory. Choosing a row creates its session there, so a chat about one project never opens in another. `--here` narrows the list to the current directory.
 
 **Session names are derived, never asked for.** They become `<agent>-<directory>`, numbered when that name is taken. tmux needs a name to reattach by; you do not need to think about it.
@@ -240,7 +242,7 @@ What it gives up is cmux's own agent lifecycle, which is accepted only from insi
 | `~/.claude/sessions/*.json` | which conversation each running agent holds, its directory, pid, and published status |
 | `~/.claude/projects/<dir key>/<id>.jsonl` | saved conversations, and the title the agent gave the task |
 | `<id>/subagents/*.jsonl` | work a dispatched subagent is doing |
-| `tmux list-sessions` | which session is attached, and to whom |
+| `tmux list-sessions`, `list-panes`, on every socket in tmux's socket directory | which server and session hold each chat, and whether a terminal is attached |
 | `~/.codex` rollouts | Codex conversations, listed where they exist |
 
 A registry entry outlives its process, so every pid is checked before its row is trusted.

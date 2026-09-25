@@ -78,6 +78,8 @@ pub struct Chat {
     pub state: State,
     /// The tmux session holding it, when one does.
     pub session: Option<String>,
+    /// The socket of the tmux server holding that session, since a name is unique only per server.
+    pub server: Option<PathBuf>,
     /// Terminals attached to that session.
     pub attached: u32,
     /// How many tmux sessions hold this one conversation.
@@ -100,8 +102,12 @@ pub enum Scope {
 /// What opening a chat requires of the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Move the terminal to the session already holding it.
-    Attach { session: String },
+    /// Move the terminal to the session already holding it, on the server named by its socket.
+    /// With no socket, a bare `tmux` decides the server.
+    Attach {
+        session: String,
+        server: Option<PathBuf>,
+    },
     /// Start an agent on a saved conversation.
     Resume {
         agent: Agent,
@@ -148,6 +154,7 @@ impl Chat {
         match (self.state, &self.session) {
             (s, Some(session)) if s.is_live_in_tmux() => Action::Attach {
                 session: session.clone(),
+                server: self.server.clone(),
             },
             // A live process with no session to join is taken over whatever the row says, so a
             // state that outran its session can never start a second agent on the conversation.

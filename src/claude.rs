@@ -56,6 +56,9 @@ struct Live {
     dir: PathBuf,
     pid: i32,
     session: Option<String>,
+    /// The registry's `session:@window.%pane`, which pins one pane on one server where the session
+    /// name alone may not.
+    pane: Option<String>,
     /// What the agent said about itself, and `None` when it published nothing: an older agent has
     /// no status to read, and only then does the write clock decide the state.
     working: Option<bool>,
@@ -117,8 +120,10 @@ fn live_agents() -> Vec<Live> {
             // anything can be attached to.
             session: reg
                 .tmux
-                .filter(|t| t != "-" && !t.is_empty())
-                .map(|t| t.split(':').next().unwrap_or(&t).to_string()),
+                .as_deref()
+                .filter(|t| *t != "-" && !t.is_empty())
+                .map(|t| t.split(':').next().unwrap_or(t).to_string()),
+            pane: reg.tmux.filter(|t| t != "-" && t.contains(':')),
             working: reg
                 .status
                 .as_deref()
@@ -135,14 +140,42 @@ fn live_agents() -> Vec<Live> {
 /// Read at the moment a row is acted on, because the drawn list is a snapshot: a conversation with
 /// nothing holding it a second ago can be live now, and starting a second agent on it would put two
 /// of them on one transcript.
-pub fn live_session_for(id: &str) -> Option<String> {
+pub fn live_session_for(id: &str) -> Option<(PathBuf, String)> {
     let sessions = crate::tmux::sessions();
+    let panes = crate::tmux::panes();
     live_agents()
-        .into_iter()
+        .iter()
         .filter(|live| live.id == id)
-        .filter_map(|live| live.session)
-        .filter(|name| sessions.contains_key(name))
-        .max_by_key(|name| sessions.get(name).map(|s| s.activity).unwrap_or(0))
+        .filter_map(|live| locate(live, &sessions, &panes))
+        .max_by_key(|s| s.activity)
+        .map(|s| (s.server.clone(), s.name.clone()))
+}
+
+/// The session a live agent runs in. The registry's pane reference names a pane, and each server
+/// numbers its own windows and panes, so two servers can hold the same reference. The agent's own
+/// terminal settles that, since a tty belongs to one pane on the machine. A pane moved to another
+/// window no longer matches its record, so the session name is the last resort, taking the default
+/// server's session first.
+fn locate<'a>(
+    live: &Live,
+    sessions: &'a tmux::Sessions,
+    panes: &[tmux::Pane],
+) -> Option<&'a tmux::Session> {
+    let name = live.session.as_deref()?;
+    let matching: Vec<&tmux::Pane> = match live.pane.as_deref() {
+        Some(target) => panes.iter().filter(|p| p.target == target).collect(),
+        None => Vec::new(),
+    };
+    let pane = match matching.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        several => {
+            let tty = crate::term::tty_of(live.pid);
+            several.iter().copied().find(|p| Some(&p.tty) == tty.as_ref())
+        }
+    };
+    pane.and_then(|p| sessions.get(&p.server, &p.session))
+        .or_else(|| sessions.named(name).first().copied())
 }
 
 /// Every live agent holding a conversation, which can be more than one when they run outside tmux.
@@ -341,7 +374,7 @@ fn dir_of(transcript: &Path) -> PathBuf {
 
 /// Every Claude chat, live or saved. One row per conversation: several tmux sessions can hold the
 /// same one, and a row each would bury every other chat under repeats of one.
-pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Chat> {
+pub fn chats(scope: &Scope, sessions: &tmux::Sessions, panes: &[tmux::Pane]) -> Vec<Chat> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -361,6 +394,7 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
             id: live.id.clone(),
             state: State::Idle,
             session: None,
+            server: None,
             attached: 0,
             held: 0,
             pid: Some(live.pid),
@@ -384,30 +418,20 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
 
         // The row points at the session that was active most recently, since that is the one worth
         // joining when several hold the conversation.
-        let activity = live
-            .session
-            .as_ref()
-            .and_then(|s| sessions.get(s))
-            .map(|s| s.activity)
-            .unwrap_or(0);
         let better = entry
             .session
-            .as_ref()
-            .and_then(|s| sessions.get(s))
+            .as_deref()
+            .zip(entry.server.as_deref())
+            .and_then(|(name, server)| sessions.get(server, name))
             .map(|s| s.activity)
             .unwrap_or(-1);
-        let session_exists = live
-            .session
-            .as_ref()
-            .map(|name| sessions.contains_key(name))
-            .unwrap_or(false);
-        if session_exists && activity >= better {
-            entry.session = live.session.clone();
-            entry.pid = Some(live.pid);
-            entry.attached = sessions
-                .get(live.session.as_deref().unwrap_or_default())
-                .map(|s| s.attached)
-                .unwrap_or(0);
+        if let Some(at) = locate(&live, sessions, panes) {
+            if at.activity >= better {
+                entry.session = Some(at.name.clone());
+                entry.server = Some(at.server.clone());
+                entry.pid = Some(live.pid);
+                entry.attached = at.attached;
+            }
         }
 
         let worked = work_epoch(&transcript);
@@ -448,6 +472,7 @@ pub fn chats(scope: &Scope, sessions: &HashMap<String, tmux::Session>) -> Vec<Ch
             id,
             state: State::Exited,
             session: None,
+            server: None,
             attached: 0,
             held: 1,
             pid: None,
