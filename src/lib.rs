@@ -69,6 +69,21 @@ pub fn open(action: &Action) -> std::io::Result<()> {
         if let Some((server, session)) = claude::live_session_for(id) {
             return attach(&session, Some(&server));
         }
+        // An agent started outside tmux after the snapshot has no session to join. Resuming beside
+        // it puts two agents on one transcript, and ending it needs the confirmation a fresh list
+        // asks for, so the choice goes back to the list.
+        if let Action::Resume { agent: Agent::Claude, .. } = action {
+            let holding = claude::pids_holding(id);
+            if !holding.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "a live agent outside tmux now holds that conversation (pid {}); list the chats again to take it over",
+                        pid_list(&holding)
+                    ),
+                ));
+            }
+        }
     }
     match action {
         Action::Attach { session, server } => attach(session, server.as_deref()),
@@ -96,8 +111,11 @@ pub fn open(action: &Action) -> std::io::Result<()> {
         } => {
             // A running process cannot be moved onto another terminal, so the conversation moves
             // instead: the old agent is asked to stop, then the same conversation reopens inside a
-            // session.
-            end_agent(*pid);
+            // session. Every agent holding it stops, since one left running would share the
+            // transcript with the new one.
+            for holder in holders_of(id, *pid) {
+                end_agent(holder);
+            }
             let name = tmux::free_name(agent.as_str(), dir);
             spawn(&name, resume_command(*agent, id), dir)
         }
@@ -204,6 +222,19 @@ fn attach(session: &str, server: Option<&Path>) -> std::io::Result<()> {
         cmd.args(["-t", &target]);
     }
     Err(cmd.exec())
+}
+
+/// Every agent holding a conversation, read now, plus the one a row named.
+pub fn holders_of(id: &str, pid: i32) -> Vec<i32> {
+    let mut holding = claude::pids_holding(id);
+    if !holding.contains(&pid) {
+        holding.push(pid);
+    }
+    holding
+}
+
+fn pid_list(pids: &[i32]) -> String {
+    pids.iter().map(i32::to_string).collect::<Vec<_>>().join(", ")
 }
 
 /// One argument for `sh -c`, whatever it holds.

@@ -554,7 +554,9 @@ fn pick(chats: &[Chat]) {
                         }
                         Some(_) => {}
                     }
-                    println!("ending pid {pid} so the conversation can reopen under tmux");
+                    let holding = agent_tmux::holders_of(&chat.id, pid);
+                    let pids: Vec<String> = holding.iter().map(i32::to_string).collect();
+                    println!("ending pid {} so the conversation can reopen under tmux", pids.join(", "));
                 }
                 alt_screen(false);
                 act(&chat.action());
